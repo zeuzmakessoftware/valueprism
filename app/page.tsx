@@ -2,6 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
+import { ArrowLeft, ArrowRight, FileText } from 'lucide-react'
 import { toast } from 'sonner'
 
 import {
@@ -29,9 +30,147 @@ type ParsedSseMessage = {
   data: unknown
 }
 
+type Step = 1 | 2 | 3 | 4 | 5
+
+type ValueDimensionKey =
+  | 'riskReduction'
+  | 'transactionEnablement'
+  | 'speedAndCertainty'
+  | 'optionality'
+
+type ValueDimensionScore = {
+  key: ValueDimensionKey
+  label: string
+  description: string
+  score: number
+  amount: number
+  colorClass: string
+}
+
+type UnitSummary = {
+  businessUnit: string
+  questionCount: number
+  answeredCount: number
+  totalWords: number
+  sharePercent: number
+}
+
+type PricingSummary = {
+  totalQuestions: number
+  answeredQuestions: number
+  totalWords: number
+  averageWords: number
+  completionPercent: number
+  marketSignalLabel: string
+  valueAtStake: number
+  exposurePercent: number
+  feeBandLowPercent: number
+  feeBandHighPercent: number
+  recommendedFeePercent: number
+  priceFloor: number
+  priceCeiling: number
+  recommendedPrice: number
+  documentComplexityScore: number
+  biggestDriver: string
+  dimensions: ValueDimensionScore[]
+  units: UnitSummary[]
+  highlights: Array<{
+    businessUnit: string
+    question: string
+    preview: string
+    words: number
+  }>
+  filingDateLabel: string
+}
+
 const ANALYSIS_TOAST_ID = 'question-plan-analysis'
 const ANALYSIS_REQUEST_TIMEOUT_MS = 90000
 const INITIAL_STAGE_ID: QuestionPlanStageId = QUESTION_PLAN_STAGE_SEQUENCE[0]
+const STEP_SEQUENCE: Step[] = [1, 2, 3, 4, 5]
+const DIMENSION_META: Array<{
+  key: ValueDimensionKey
+  label: string
+  description: string
+  keywords: RegExp[]
+  colorClass: string
+}> = [
+  {
+    key: 'riskReduction',
+    label: 'Risk Reduction',
+    description: 'Litigation, regulatory, compliance, and downside exposure avoided.',
+    keywords: [
+      /\brisk\b/gi,
+      /\bexposure\b/gi,
+      /\bliabilit(y|ies)\b/gi,
+      /\blitigation\b/gi,
+      /\blawsuit\b/gi,
+      /\bclaim(s)?\b/gi,
+      /\bregulator(y|ies)\b/gi,
+      /\bcompliance\b/gi,
+      /\bfine(s)?\b/gi,
+      /\bbreach(es)?\b/gi,
+      /\bindemnif(y|ication)\b/gi
+    ],
+    colorClass: 'bg-red-500'
+  },
+  {
+    key: 'transactionEnablement',
+    label: 'Transaction Enablement',
+    description: 'Revenue, launches, closings, and business outcomes unlocked.',
+    keywords: [
+      /\brevenue\b/gi,
+      /\bgrowth\b/gi,
+      /\bsale(s)?\b/gi,
+      /\btransaction(s)?\b/gi,
+      /\bacquisition(s)?\b/gi,
+      /\bmerger(s)?\b/gi,
+      /\bdeal(s)?\b/gi,
+      /\blaunch\b/gi,
+      /\bcustomer(s)?\b/gi,
+      /\bmarket(s)?\b/gi,
+      /\bcontract(s)?\b/gi
+    ],
+    colorClass: 'bg-emerald-500'
+  },
+  {
+    key: 'speedAndCertainty',
+    label: 'Speed & Certainty',
+    description: 'Timing, deadline pressure, and predictability of the outcome.',
+    keywords: [
+      /\bdeadline(s)?\b/gi,
+      /\burgent\b/gi,
+      /\bquarter\b/gi,
+      /\bimmediate(ly)?\b/gi,
+      /\btiming\b/gi,
+      /\bspeed\b/gi,
+      /\bcertainty\b/gi,
+      /\bpredictab(le|ility)\b/gi,
+      /\bclose\b/gi,
+      /\btimeline\b/gi,
+      /\bwindow\b/gi
+    ],
+    colorClass: 'bg-sky-500'
+  },
+  {
+    key: 'optionality',
+    label: 'Optionality',
+    description: 'Flexibility, strategic rights, IP position, and future leverage.',
+    keywords: [
+      /\boption(s)?\b/gi,
+      /\boptionalit(y|ies)\b/gi,
+      /\bflexib(le|ility)\b/gi,
+      /\brenewal\b/gi,
+      /\bexpansion\b/gi,
+      /\bip\b/gi,
+      /\bpatent(s)?\b/gi,
+      /\blicen[sc]e(s|d)?\b/gi,
+      /\bexclusive\b/gi,
+      /\bright(s)?\b/gi,
+      /\bportfolio\b/gi
+    ],
+    colorClass: 'bg-amber-500'
+  }
+]
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -102,14 +241,251 @@ function parseSseMessage(rawMessage: string): ParsedSseMessage | null {
   }
 }
 
+function countWords(value: string) {
+  const trimmed = value.trim()
+
+  if (!trimmed) {
+    return 0
+  }
+
+  return trimmed.split(/\s+/).length
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value))
+}
+
+function roundCurrency(value: number, increment = 5000) {
+  return Math.max(increment, Math.round(value / increment) * increment)
+}
+
+function formatCurrency(value: number) {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 0
+  }).format(value)
+}
+
+function formatPercent(value: number) {
+  return `${value.toFixed(value < 1 ? 2 : 1)}%`
+}
+
+function createPreview(value: string, maxLength = 160) {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+
+  if (normalized.length <= maxLength) {
+    return normalized
+  }
+
+  return `${normalized.slice(0, maxLength).trimEnd()}…`
+}
+
+function formatFilingDate(value: string) {
+  if (!value) {
+    return 'Unknown filing date'
+  }
+
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00Z` : value
+  const parsed = new Date(normalized)
+
+  if (Number.isNaN(parsed.getTime())) {
+    return value
+  }
+
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    timeZone: 'UTC'
+  }).format(parsed)
+}
+
+function countKeywordMatches(text: string, patterns: RegExp[]) {
+  return patterns.reduce((sum, pattern) => sum + (text.match(pattern)?.length ?? 0), 0)
+}
+
+function buildPricingSummary(analysis: AnalysisResult, answers: string[]): PricingSummary {
+  const snapshots = analysis.questions.map((question, index) => {
+    const answer = answers[index]?.trim() ?? ''
+    const words = countWords(answer)
+
+    return {
+      businessUnit: question.businessUnit || 'General',
+      question: question.question,
+      answer,
+      words
+    }
+  })
+
+  const totalQuestions = snapshots.length
+  const answeredQuestions = snapshots.filter((snapshot) => snapshot.answer).length
+  const totalWords = snapshots.reduce((sum, snapshot) => sum + snapshot.words, 0)
+  const averageWords = answeredQuestions > 0 ? Math.round(totalWords / answeredQuestions) : 0
+  const completionPercent = totalQuestions > 0 ? Math.round((answeredQuestions / totalQuestions) * 100) : 0
+
+  const combinedText = snapshots.map((snapshot) => snapshot.answer.toLowerCase()).join('\n')
+
+  const dimensionBaseScores = DIMENSION_META.map((dimension) => {
+    const keywordHits = countKeywordMatches(combinedText, dimension.keywords)
+    const score = clamp(
+      Math.round(answeredQuestions * 8 + averageWords / 6 + keywordHits * 7),
+      12,
+      100
+    )
+
+    return {
+      ...dimension,
+      score
+    }
+  })
+
+  const totalDimensionScore = dimensionBaseScores.reduce((sum, dimension) => sum + dimension.score, 0)
+  const answerDepthScore = clamp(Math.round(totalWords / 16), 0, 100)
+  const documentComplexityScore = clamp(
+    Math.round(answerDepthScore * 0.55 + completionPercent * 0.25 + totalDimensionScore / 8),
+    20,
+    96
+  )
+
+  const valueAtStake = roundCurrency(
+    totalDimensionScore * 90000 + totalWords * 2400 + answeredQuestions * 650000,
+    25000
+  )
+
+  const exposurePercent = clamp(0.45 + documentComplexityScore / 12, 0.6, 8.5)
+
+  let feeBandLowPercent = 0.8
+  let feeBandHighPercent = 2
+
+  if (valueAtStake >= 250000000) {
+    feeBandLowPercent = 0.05
+    feeBandHighPercent = 0.25
+  } else if (valueAtStake >= 50000000) {
+    feeBandLowPercent = 0.12
+    feeBandHighPercent = 0.6
+  } else if (valueAtStake >= 10000000) {
+    feeBandLowPercent = 0.35
+    feeBandHighPercent = 1.1
+  }
+
+  const recommendedFeePercent = Number(
+    (feeBandLowPercent + (feeBandHighPercent - feeBandLowPercent) * (documentComplexityScore / 100)).toFixed(2)
+  )
+
+  const priceFloor = roundCurrency((valueAtStake * feeBandLowPercent) / 100)
+  const priceCeiling = roundCurrency((valueAtStake * feeBandHighPercent) / 100)
+  const recommendedPrice = roundCurrency((valueAtStake * recommendedFeePercent) / 100)
+
+  const dimensions = dimensionBaseScores.map((dimension) => ({
+    key: dimension.key,
+    label: dimension.label,
+    description: dimension.description,
+    score: dimension.score,
+    amount: roundCurrency((valueAtStake * dimension.score) / totalDimensionScore, 5000),
+    colorClass: dimension.colorClass
+  }))
+
+  const biggestDriver =
+    [...dimensions].sort((left, right) => right.amount - left.amount)[0]?.label ?? 'Risk Reduction'
+
+  const unitMap = new Map<
+    string,
+    {
+      questionCount: number
+      answeredCount: number
+      totalWords: number
+    }
+  >()
+
+  analysis.businessUnits.forEach((unit) => {
+    unitMap.set(unit, {
+      questionCount: 0,
+      answeredCount: 0,
+      totalWords: 0
+    })
+  })
+
+  snapshots.forEach((snapshot) => {
+    const existing = unitMap.get(snapshot.businessUnit) ?? {
+      questionCount: 0,
+      answeredCount: 0,
+      totalWords: 0
+    }
+
+    existing.questionCount += 1
+    existing.totalWords += snapshot.words
+
+    if (snapshot.answer) {
+      existing.answeredCount += 1
+    }
+
+    unitMap.set(snapshot.businessUnit, existing)
+  })
+
+  const units = Array.from(unitMap.entries())
+    .map(([businessUnit, summary]) => ({
+      businessUnit,
+      questionCount: summary.questionCount,
+      answeredCount: summary.answeredCount,
+      totalWords: summary.totalWords,
+      sharePercent: totalWords > 0 ? (summary.totalWords / totalWords) * 100 : 0
+    }))
+    .sort((left, right) => right.totalWords - left.totalWords)
+
+  const highlights = snapshots
+    .filter((snapshot) => snapshot.answer)
+    .sort((left, right) => right.words - left.words)
+    .slice(0, 3)
+    .map((snapshot) => ({
+      businessUnit: snapshot.businessUnit,
+      question: snapshot.question,
+      preview: createPreview(snapshot.answer),
+      words: snapshot.words
+    }))
+
+  let marketSignalLabel = 'Low-value preview'
+
+  if (valueAtStake >= 50000000) {
+    marketSignalLabel = 'High-value strategic matter'
+  } else if (valueAtStake >= 10000000) {
+    marketSignalLabel = 'Material enterprise matter'
+  } else if (valueAtStake >= 3000000) {
+    marketSignalLabel = 'Mid-scale business matter'
+  }
+
+  return {
+    totalQuestions,
+    answeredQuestions,
+    totalWords,
+    averageWords,
+    completionPercent,
+    marketSignalLabel,
+    valueAtStake,
+    exposurePercent,
+    feeBandLowPercent,
+    feeBandHighPercent,
+    recommendedFeePercent,
+    priceFloor,
+    priceCeiling,
+    recommendedPrice,
+    documentComplexityScore,
+    biggestDriver,
+    dimensions,
+    units,
+    highlights,
+    filingDateLabel: formatFilingDate(analysis.latestTenK.filingDate)
+  }
+}
+
 export default function Home() {
-  const [step, setStep] = useState(1)
+  const [step, setStep] = useState<Step>(1)
   const [query, setQuery] = useState('')
   const [companies, setCompanies] = useState<Company[]>([])
   const [filtered, setFiltered] = useState<Company[]>([])
   const [isOpen, setIsOpen] = useState(false)
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
-  const [answer, setAnswer] = useState('')
+  const [answers, setAnswers] = useState<string[]>([])
   const containerRef = useRef<HTMLDivElement>(null)
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([])
   const [selectedCompany, setSelectedCompany] = useState<Company | null>(null)
@@ -126,12 +502,17 @@ export default function Home() {
   const analysisProgressPercent = ((analysisStageIndex + 1) / QUESTION_PLAN_STAGE_SEQUENCE.length) * 100
   const isGeneratingQuestions = analysisProgress.stageId === 'generating-questions'
   const completedStageIds = QUESTION_PLAN_STAGE_SEQUENCE.slice(0, analysisStageIndex)
+  const questions = analysis?.questions ?? []
+  const currentQuestion = questions[currentQuestionIndex]
+  const currentAnswer = answers[currentQuestionIndex] ?? ''
+  const completedQuestionCount = questions.filter((_, index) => Boolean(answers[index]?.trim())).length
+  const pricingSummary = analysis ? buildPricingSummary(analysis, answers) : null
 
   const resetAnalysis = () => {
     setAnalysis(null)
     setAnalysisError('')
     setCurrentQuestionIndex(0)
-    setAnswer('')
+    setAnswers([])
     setAnalysisAttempt(0)
     setAnalysisProgress({
       stageId: INITIAL_STAGE_ID,
@@ -245,18 +626,18 @@ export default function Home() {
     }
   }
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
-      const newFiles = Array.from(e.target.files)
+  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (event.target.files) {
+      const newFiles = Array.from(event.target.files)
       resetAnalysis()
       setUploadedFiles((prev) => [...prev, ...newFiles])
-      e.target.value = ''
+      event.target.value = ''
     }
   }
 
   const removeFile = (index: number) => {
     resetAnalysis()
-    setUploadedFiles((prev) => prev.filter((_, i) => i !== index))
+    setUploadedFiles((prev) => prev.filter((_, itemIndex) => itemIndex !== index))
   }
 
   useEffect(() => {
@@ -269,8 +650,8 @@ export default function Home() {
           title: company.title
         }))
         setCompanies(list)
-      } catch (err) {
-        console.error('Failed to fetch tickers', err)
+      } catch (error) {
+        console.error('Failed to fetch tickers', error)
       }
     }
 
@@ -293,6 +674,24 @@ export default function Home() {
 
     setFiltered(results)
   }, [query, companies])
+
+  useEffect(() => {
+    function handlePointerDown(event: MouseEvent) {
+      if (!containerRef.current) {
+        return
+      }
+
+      if (event.target instanceof Node && !containerRef.current.contains(event.target)) {
+        setIsOpen(false)
+      }
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown)
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+    }
+  }, [])
 
   useEffect(() => {
     return () => {
@@ -323,6 +722,8 @@ export default function Home() {
         try {
           const payload = await requestQuestionPlanStream(attempt)
           setAnalysis(payload)
+          setAnswers(Array.from({ length: payload.questions.length }, () => ''))
+          setCurrentQuestionIndex(0)
           setStep(4)
           toast.success('Step 4 questions ready', {
             id: ANALYSIS_TOAST_ID,
@@ -345,8 +746,8 @@ export default function Home() {
           await sleep(900 * attempt)
         }
       }
-    } catch (err) {
-      const message = getErrorMessage(err)
+    } catch (error) {
+      const message = getErrorMessage(error)
       setAnalysisError(message)
       toast.error('Analysis failed', {
         id: ANALYSIS_TOAST_ID,
@@ -357,31 +758,41 @@ export default function Home() {
     }
   }
 
-  const questions = analysis?.questions ?? []
-  const currentQuestion = questions[currentQuestionIndex]
+  const updateCurrentAnswer = (value: string) => {
+    setAnswers((prev) => {
+      const next = [...prev]
+      next[currentQuestionIndex] = value
+      return next
+    })
+  }
 
   const handleNextQuestion = () => {
+    if (!currentAnswer.trim()) {
+      return
+    }
+
     if (currentQuestionIndex < questions.length - 1) {
       setCurrentQuestionIndex((prev) => prev + 1)
-      setAnswer('')
-    } else {
-      toast.success('Analysis complete', {
-        description: 'The review flow reached the end of the generated questions.'
-      })
+      return
     }
+
+    setStep(5)
   }
+
+  const containerWidth =
+    step === 5 ? 'max-w-[960px]' : step === 4 ? 'max-w-[620px]' : 'max-w-[440px]'
 
   return (
     <div className="min-h-screen bg-[#f4f4f5] flex items-center justify-center p-6 font-sans">
-      <div className="w-full max-w-[440px]">
+      <div className={`w-full ${containerWidth}`}>
         <div className="flex justify-center mb-10">
           <div className="flex items-center gap-2">
-            {[1, 2, 3, 4].map((i) => (
+            {STEP_SEQUENCE.map((item) => (
               <motion.div
-                key={i}
+                key={item}
                 animate={{
-                  width: step === i ? 32 : 12,
-                  backgroundColor: step >= i ? '#10b981' : '#d4d4d8'
+                  width: step === item ? 32 : 12,
+                  backgroundColor: step >= item ? '#10b981' : '#d4d4d8'
                 }}
                 className="h-1.5 rounded-full"
               />
@@ -434,7 +845,10 @@ export default function Home() {
                 </div>
                 <button
                   onClick={() => {
-                    if (!query.trim()) return
+                    if (!query.trim()) {
+                      return
+                    }
+
                     resetAnalysis()
                     setStep(2)
                   }}
@@ -464,7 +878,7 @@ export default function Home() {
                 {uploadedFiles.length > 0 && (
                   <div className="space-y-2">
                     <p className="text-[12px] font-semibold text-zinc-500 uppercase tracking-wider">Uploaded Files</p>
-                    <div className="max-h-40 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
+                    <div className="max-h-40 overflow-y-auto space-y-2 pr-2">
                       {uploadedFiles.map((file, idx) => (
                         <div
                           key={`${file.name}-${idx}`}
@@ -486,7 +900,10 @@ export default function Home() {
                 )}
 
                 <div className="flex gap-3">
-                  <button onClick={() => setStep(1)} className="h-12 flex-1 rounded-2xl border border-zinc-300 bg-white font-medium text-zinc-900">
+                  <button
+                    onClick={() => setStep(1)}
+                    className="h-12 flex-1 rounded-2xl border border-zinc-300 bg-white font-medium text-zinc-900"
+                  >
                     Back
                   </button>
                   <button
@@ -673,22 +1090,23 @@ export default function Home() {
                 key="step4"
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
                 className="space-y-6"
               >
-                <div className="space-y-4">
-                  <div className="bg-white border border-zinc-200 rounded-2xl p-4 shadow-sm space-y-3">
-                    <div className="flex flex-wrap gap-2">
-                      {analysis.businessUnits.map((businessUnit) => (
-                        <span
-                          key={businessUnit}
-                          className="inline-flex items-center rounded-full bg-zinc-100 px-3 py-1 text-[11px] font-medium uppercase tracking-wide text-zinc-700"
-                        >
-                          {businessUnit}
-                        </span>
-                      ))}
-                    </div>
+                <div className="bg-white border border-zinc-200 rounded-2xl p-4 shadow-sm space-y-3">
+                  <div className="flex flex-wrap gap-2">
+                    {analysis.businessUnits.map((businessUnit) => (
+                      <span
+                        key={businessUnit}
+                        className="inline-flex items-center rounded-full bg-zinc-100 px-3 py-1 text-[11px] font-medium uppercase tracking-wide text-zinc-700"
+                      >
+                        {businessUnit}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="flex items-center justify-between gap-4">
                     <p className="text-[12px] text-zinc-500 leading-relaxed">
-                      Question plan generated from {analysis.company.name}&apos;s {analysis.latestTenK.filingDate} 10-K.{' '}
+                      Question plan generated from {analysis.company.name}&apos;s {pricingSummary?.filingDateLabel} 10-K.{' '}
                       <a
                         href={analysis.latestTenK.url}
                         target="_blank"
@@ -698,36 +1116,241 @@ export default function Home() {
                         View filing
                       </a>
                     </p>
-                  </div>
-
-                  <div className="bg-emerald-50 text-emerald-900 p-4 rounded-2xl rounded-bl-none border border-emerald-100 space-y-2">
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-700">
-                      {currentQuestion.businessUnit}
-                    </p>
-                    <p className="text-[14px] leading-relaxed font-medium">{currentQuestion.question}</p>
-                  </div>
-
-                  <div className="relative">
-                    <textarea
-                      className="w-full min-h-[120px] p-4 bg-white border border-zinc-200 rounded-2xl text-[14px] focus:ring-2 ring-emerald-500/20 focus:outline-none resize-none shadow-sm"
-                      placeholder="Type your answer here..."
-                      value={answer}
-                      onChange={(e) => setAnswer(e.target.value)}
-                    />
+                    <span className="text-[12px] text-zinc-400 font-medium">
+                      {completedQuestionCount} / {questions.length}
+                    </span>
                   </div>
                 </div>
 
+                <div className="bg-emerald-50 text-emerald-900 p-4 rounded-2xl rounded-bl-none border border-emerald-100 space-y-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-700">
+                    {currentQuestion.businessUnit}
+                  </p>
+                  <p className="text-[14px] leading-relaxed font-medium">{currentQuestion.question}</p>
+                </div>
+
+                <div className="relative">
+                  <textarea
+                    className="w-full min-h-[150px] p-4 bg-white border border-zinc-200 rounded-2xl text-[14px] focus:ring-2 ring-emerald-500/20 focus:outline-none resize-none shadow-sm"
+                    placeholder="Type your answer here..."
+                    value={currentAnswer}
+                    onChange={(event) => updateCurrentAnswer(event.target.value)}
+                  />
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  {questions.map((question, index) => {
+                    const isActive = index === currentQuestionIndex
+                    const isAnswered = Boolean(answers[index]?.trim())
+
+                    return (
+                      <button
+                        key={`${question.businessUnit}-${index}`}
+                        onClick={() => setCurrentQuestionIndex(index)}
+                        className={`px-3 py-1.5 rounded-full text-[11px] font-medium border transition-colors ${
+                          isActive
+                            ? 'border-zinc-900 bg-zinc-900 text-white'
+                            : isAnswered
+                              ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                              : 'border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50'
+                        }`}
+                      >
+                        Q{index + 1}
+                      </button>
+                    )
+                  })}
+                </div>
+
                 <div className="flex items-center justify-between gap-4">
+                  <button
+                    disabled={currentQuestionIndex === 0}
+                    onClick={() => setCurrentQuestionIndex((prev) => Math.max(0, prev - 1))}
+                    className="h-11 px-4 rounded-xl border border-zinc-300 bg-white text-zinc-900 text-[14px] font-medium disabled:opacity-50"
+                  >
+                    Previous
+                  </button>
                   <p className="text-[12px] text-zinc-400 font-medium uppercase tracking-wider">
                     Question {currentQuestionIndex + 1} of {questions.length}
                   </p>
                   <button
-                    disabled={!answer}
+                    disabled={!currentAnswer.trim()}
                     onClick={handleNextQuestion}
                     className="h-11 px-6 rounded-xl bg-zinc-900 text-white text-[14px] font-medium disabled:opacity-50 disabled:cursor-not-allowed hover:bg-zinc-800 transition-colors"
                   >
-                    {currentQuestionIndex === questions.length - 1 ? 'Finish Analysis' : 'Next Question'}
+                    {currentQuestionIndex === questions.length - 1 ? 'View Pricing Result' : 'Next Question'}
                   </button>
+                </div>
+              </motion.div>
+            )}
+
+            {step === 5 && analysis && pricingSummary && (
+              <motion.div
+                key="step5"
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -12 }}
+                className="space-y-4"
+              >
+                <div className="bg-white border border-zinc-200 rounded-2xl overflow-hidden shadow-sm">
+                  <div className="p-5 border-b border-zinc-200 flex items-start justify-between gap-4">
+                    <div>
+                      <h2 className="text-[18px] font-semibold text-zinc-900">
+                        {analysis.company.name} Value Pricing Output
+                      </h2>
+                      <p className="text-[13px] text-zinc-500 mt-1">
+                        Client-side preview based on the uploaded materials and the completed questions. Firm-side inputs would refine the point within the band.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setStep(4)}
+                      className="inline-flex items-center gap-2 rounded-lg border border-zinc-200 px-3 py-2 text-[12px] font-medium text-zinc-600 hover:bg-zinc-50"
+                    >
+                      <ArrowLeft className="h-4 w-4" />
+                      Back
+                    </button>
+                  </div>
+
+                  <div className="p-8 text-center border-b border-zinc-200">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-400">
+                      Recommended Price
+                    </p>
+                    <div className="mt-3 text-[48px] font-semibold tracking-tight text-emerald-600">
+                      {formatCurrency(pricingSummary.recommendedPrice)}
+                    </div>
+                    <p className="mt-2 text-[14px] text-zinc-600">
+                      Range {formatCurrency(pricingSummary.priceFloor)} to {formatCurrency(pricingSummary.priceCeiling)}
+                    </p>
+                    <p className="mt-3 text-[12px] text-zinc-500">
+                      {pricingSummary.marketSignalLabel} · fee curve point {formatPercent(pricingSummary.recommendedFeePercent)}
+                    </p>
+                  </div>
+
+                  <div className="grid gap-4 p-5 md:grid-cols-3 border-b border-zinc-200">
+                    <MetricCard
+                      label="Estimated Value At Stake"
+                      value={formatCurrency(pricingSummary.valueAtStake)}
+                      detail={`Exposure proxy ${formatPercent(pricingSummary.exposurePercent)}`}
+                    />
+                    <MetricCard
+                      label="Fee Band"
+                      value={`${formatPercent(pricingSummary.feeBandLowPercent)}–${formatPercent(pricingSummary.feeBandHighPercent)}`}
+                      detail="Mapped from the indicative deck curve"
+                    />
+                    <MetricCard
+                      label="Document Complexity"
+                      value={`${pricingSummary.documentComplexityScore}/100`}
+                      detail={`${pricingSummary.answeredQuestions}/${pricingSummary.totalQuestions} questions answered`}
+                    />
+                  </div>
+
+                  <div className="p-5 border-b border-zinc-200">
+                    <SectionTitle
+                      title="Value Breakdown"
+                      subtitle="Four value dimensions from the pitch deck translated into this pricing preview."
+                    />
+                    <div className="space-y-4">
+                      {pricingSummary.dimensions.map((dimension) => (
+                        <div key={dimension.key} className="space-y-2">
+                          <div className="flex items-center justify-between gap-4">
+                            <div>
+                              <p className="text-[13px] font-medium text-zinc-900">{dimension.label}</p>
+                              <p className="text-[11px] text-zinc-500">{dimension.description}</p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-[13px] font-semibold text-zinc-900">{formatCurrency(dimension.amount)}</p>
+                              <p className="text-[11px] text-zinc-400">{dimension.score}/100</p>
+                            </div>
+                          </div>
+                          <div className="h-2 rounded-full bg-zinc-100 overflow-hidden">
+                            <div
+                              className={`h-full rounded-full ${dimension.colorClass}`}
+                              style={{ width: `${dimension.score}%` }}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="p-5 border-b border-zinc-200">
+                    <SectionTitle
+                      title="Business Unit Cross-Section"
+                      subtitle="Where the answer set concentrated the most pricing-relevant detail."
+                    />
+                    <div className="space-y-3">
+                      {pricingSummary.units.map((unit) => (
+                        <div key={unit.businessUnit} className="flex items-center gap-4">
+                          <div className="min-w-[150px]">
+                            <p className="text-[13px] font-medium text-zinc-900">{unit.businessUnit}</p>
+                            <p className="text-[11px] text-zinc-500">
+                              {unit.answeredCount}/{unit.questionCount} answered · {unit.totalWords.toLocaleString()} words
+                            </p>
+                          </div>
+                          <div className="flex-1 h-2 rounded-full bg-zinc-100 overflow-hidden">
+                            <div
+                              className="h-full rounded-full bg-emerald-500"
+                              style={{ width: `${Math.max(unit.sharePercent, 4)}%` }}
+                            />
+                          </div>
+                          <div className="w-14 text-right text-[12px] text-zinc-500">
+                            {unit.sharePercent.toFixed(0)}%
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="p-5 border-b border-zinc-200">
+                    <SectionTitle
+                      title="Input Transparency"
+                      subtitle="The most detailed answers driving the recommendation."
+                    />
+                    <div className="space-y-3">
+                      {pricingSummary.highlights.map((highlight, index) => (
+                        <div key={`${highlight.businessUnit}-${index}`} className="rounded-xl border border-zinc-200 bg-zinc-50 p-4">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="inline-flex items-center rounded-full bg-white px-3 py-1 text-[11px] font-medium uppercase tracking-wide text-zinc-700 border border-zinc-200">
+                              {highlight.businessUnit}
+                            </span>
+                            <span className="text-[11px] text-zinc-500">{highlight.words} words</span>
+                          </div>
+                          <p className="mt-3 text-[13px] font-medium text-zinc-900">{highlight.question}</p>
+                          <p className="mt-2 text-[12px] text-zinc-600 leading-relaxed">{highlight.preview}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="p-5">
+                    <SectionTitle
+                      title="Pricing Summary"
+                      subtitle="A simple hackathon-friendly translation of the deck logic."
+                    />
+                    <div className="space-y-3">
+                      <SummaryRow label="Latest 10-K" value={`${pricingSummary.filingDateLabel} filing`} />
+                      <SummaryRow label="Primary value driver" value={pricingSummary.biggestDriver} />
+                      <SummaryRow label="Average response depth" value={`${pricingSummary.averageWords} words per answer`} />
+                      <SummaryRow label="Recommended point" value={formatCurrency(pricingSummary.recommendedPrice)} />
+                    </div>
+                    <div className="mt-5 flex flex-wrap gap-3">
+                      <a
+                        href={analysis.latestTenK.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-2 rounded-xl border border-zinc-300 bg-white px-4 py-3 text-[13px] font-medium text-zinc-900 hover:bg-zinc-50"
+                      >
+                        <FileText className="h-4 w-4" />
+                        View filing
+                      </a>
+                      <button
+                        onClick={() => setStep(4)}
+                        className="inline-flex items-center gap-2 rounded-xl bg-zinc-900 px-4 py-3 text-[13px] font-medium text-white hover:bg-zinc-800"
+                      >
+                        Refine Answers
+                        <ArrowRight className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </motion.div>
             )}
@@ -747,7 +1370,7 @@ function Field({
   label: string
   value: string
   placeholder?: string
-  onChange: (val: string) => void
+  onChange: (value: string) => void
 }) {
   return (
     <div className="rounded-2xl bg-zinc-200/50 px-4 py-3.5 focus-within:ring-2 ring-emerald-500/20 transition-all border border-transparent focus-within:bg-white focus-within:border-zinc-200">
@@ -755,10 +1378,58 @@ function Field({
       <input
         type="text"
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
         className="w-full bg-transparent text-[15px] text-zinc-900 placeholder-zinc-400 focus:outline-none"
       />
+    </div>
+  )
+}
+
+function MetricCard({
+  label,
+  value,
+  detail
+}: {
+  label: string
+  value: string
+  detail: string
+}) {
+  return (
+    <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4">
+      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-400">{label}</p>
+      <p className="mt-2 text-[20px] font-semibold text-zinc-900">{value}</p>
+      <p className="mt-1 text-[12px] text-zinc-500">{detail}</p>
+    </div>
+  )
+}
+
+function SectionTitle({
+  title,
+  subtitle
+}: {
+  title: string
+  subtitle: string
+}) {
+  return (
+    <div className="mb-4">
+      <h3 className="text-[13px] font-semibold uppercase tracking-[0.18em] text-zinc-500">{title}</h3>
+      <p className="mt-1 text-[12px] text-zinc-500">{subtitle}</p>
+    </div>
+  )
+}
+
+function SummaryRow({
+  label,
+  value
+}: {
+  label: string
+  value: string
+}) {
+  return (
+    <div className="flex justify-between items-center gap-4 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
+      <span className="text-[13px] text-zinc-600">{label}</span>
+      <span className="text-[13px] font-semibold text-zinc-900 text-right">{value}</span>
     </div>
   )
 }

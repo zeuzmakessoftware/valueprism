@@ -5,6 +5,8 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { ArrowLeft, ArrowRight, FileText } from 'lucide-react'
 import { toast } from 'sonner'
 
+import { Input } from '@/components/ui/input'
+import { Slider } from '@/components/ui/slider'
 import {
   type AnalysisResult,
   type QuestionPlanCompletePayload,
@@ -30,7 +32,28 @@ type ParsedSseMessage = {
   data: unknown
 }
 
-type Step = 1 | 2 | 3 | 4 | 5
+type Step = 1 | 2 | 3 | 4 | 5 | 6
+
+type MatterProfileOption = {
+  label: string
+  score: number
+}
+
+type MatterProfile = {
+  businessImpactIndex: number
+  footprintIndex: number
+  complexityIndex: number
+  urgencyIndex: number
+  riskProfile: number
+  counterpartyIndex: number
+  visibilityIndex: number
+}
+
+type MatterProfileSummaryItem = {
+  label: string
+  selectedLabel: string
+  score: number
+}
 
 type ValueDimensionKey =
   | 'riskReduction'
@@ -62,6 +85,7 @@ type PricingSummary = {
   averageWords: number
   completionPercent: number
   marketSignalLabel: string
+  baseValueAtStake: number
   valueAtStake: number
   exposurePercent: number
   feeBandLowPercent: number
@@ -72,6 +96,10 @@ type PricingSummary = {
   recommendedPrice: number
   documentComplexityScore: number
   biggestDriver: string
+  matterProfileScore: number
+  matterProfileAdjustment: number
+  matterProfileSignalLabel: string
+  riskProfile: number
   dimensions: ValueDimensionScore[]
   units: UnitSummary[]
   highlights: Array<{
@@ -86,7 +114,53 @@ type PricingSummary = {
 const ANALYSIS_TOAST_ID = 'question-plan-analysis'
 const ANALYSIS_REQUEST_TIMEOUT_MS = 90000
 const INITIAL_STAGE_ID: QuestionPlanStageId = QUESTION_PLAN_STAGE_SEQUENCE[0]
-const STEP_SEQUENCE: Step[] = [1, 2, 3, 4, 5]
+const STEP_SEQUENCE: Step[] = [1, 2, 3, 4, 5, 6]
+const BUSINESS_IMPACT_OPTIONS: MatterProfileOption[] = [
+  { label: 'Business as usual', score: 1 },
+  { label: 'Reductive', score: 2 },
+  { label: 'Protective', score: 2 },
+  { label: 'Enabling', score: 3 },
+  { label: 'Transformative', score: 4 }
+]
+const FOOTPRINT_OPTIONS: MatterProfileOption[] = [
+  { label: 'Single jurisdiction', score: 1 },
+  { label: 'Multi-jurisdiction', score: 2 },
+  { label: 'Cross border', score: 3 }
+]
+const COMPLEXITY_OPTIONS: MatterProfileOption[] = [
+  { label: 'Low', score: 1 },
+  { label: 'Medium', score: 2 },
+  { label: 'High', score: 3 }
+]
+const URGENCY_OPTIONS: MatterProfileOption[] = [
+  { label: 'Low priority', score: 0.5 },
+  { label: 'Business as usual', score: 1 },
+  { label: 'Urgent', score: 2 },
+  { label: 'Emergency', score: 23 }
+]
+const COUNTERPARTY_OPTIONS: MatterProfileOption[] = [
+  { label: 'Unsophisticated', score: 1 },
+  { label: 'Competent', score: 2 },
+  { label: 'Government', score: 3 }
+]
+const VISIBILITY_OPTIONS: MatterProfileOption[] = [
+  { label: 'Routine', score: 1 },
+  { label: 'Management', score: 2 },
+  { label: 'Board', score: 3 },
+  { label: 'Public', score: 4 }
+]
+const DEFAULT_MATTER_PROFILE: MatterProfile = {
+  businessImpactIndex: 0,
+  footprintIndex: 0,
+  complexityIndex: 1,
+  urgencyIndex: 1,
+  riskProfile: 5000000,
+  counterpartyIndex: 1,
+  visibilityIndex: 1
+}
+const MATTER_PROFILE_SCORE_MAX = 40
+const RISK_PROFILE_MAX = 250000000
+const RISK_PROFILE_STEP = 250000
 const DIMENSION_META: Array<{
   key: ValueDimensionKey
   label: string
@@ -187,7 +261,7 @@ function getErrorMessage(error: unknown) {
     return 'The analysis request timed out before the server finished streaming the result.'
   }
 
-  return error instanceof Error ? error.message : 'Failed to generate step 4 questions'
+  return error instanceof Error ? error.message : 'Failed to generate review questions'
 }
 
 function isRetriableRequestError(error: unknown) {
@@ -267,6 +341,10 @@ function formatCurrency(value: number) {
   }).format(value)
 }
 
+function formatScore(value: number) {
+  return Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)
+}
+
 function formatPercent(value: number) {
   return `${value.toFixed(value < 1 ? 2 : 1)}%`
 }
@@ -305,7 +383,74 @@ function countKeywordMatches(text: string, patterns: RegExp[]) {
   return patterns.reduce((sum, pattern) => sum + (text.match(pattern)?.length ?? 0), 0)
 }
 
-function buildPricingSummary(analysis: AnalysisResult, answers: string[]): PricingSummary {
+function getMatterProfileSelections(matterProfile: MatterProfile): MatterProfileSummaryItem[] {
+  return [
+    {
+      label: 'Business Impact',
+      selectedLabel: BUSINESS_IMPACT_OPTIONS[matterProfile.businessImpactIndex]?.label ?? BUSINESS_IMPACT_OPTIONS[0].label,
+      score: BUSINESS_IMPACT_OPTIONS[matterProfile.businessImpactIndex]?.score ?? BUSINESS_IMPACT_OPTIONS[0].score
+    },
+    {
+      label: 'Footprint',
+      selectedLabel: FOOTPRINT_OPTIONS[matterProfile.footprintIndex]?.label ?? FOOTPRINT_OPTIONS[0].label,
+      score: FOOTPRINT_OPTIONS[matterProfile.footprintIndex]?.score ?? FOOTPRINT_OPTIONS[0].score
+    },
+    {
+      label: 'Complexity',
+      selectedLabel: COMPLEXITY_OPTIONS[matterProfile.complexityIndex]?.label ?? COMPLEXITY_OPTIONS[0].label,
+      score: COMPLEXITY_OPTIONS[matterProfile.complexityIndex]?.score ?? COMPLEXITY_OPTIONS[0].score
+    },
+    {
+      label: 'Urgency',
+      selectedLabel: URGENCY_OPTIONS[matterProfile.urgencyIndex]?.label ?? URGENCY_OPTIONS[0].label,
+      score: URGENCY_OPTIONS[matterProfile.urgencyIndex]?.score ?? URGENCY_OPTIONS[0].score
+    },
+    {
+      label: 'Counterparty',
+      selectedLabel: COUNTERPARTY_OPTIONS[matterProfile.counterpartyIndex]?.label ?? COUNTERPARTY_OPTIONS[0].label,
+      score: COUNTERPARTY_OPTIONS[matterProfile.counterpartyIndex]?.score ?? COUNTERPARTY_OPTIONS[0].score
+    },
+    {
+      label: 'Visibility',
+      selectedLabel: VISIBILITY_OPTIONS[matterProfile.visibilityIndex]?.label ?? VISIBILITY_OPTIONS[0].label,
+      score: VISIBILITY_OPTIONS[matterProfile.visibilityIndex]?.score ?? VISIBILITY_OPTIONS[0].score
+    }
+  ]
+}
+
+function getMatterProfileSignalLabel(score: number) {
+  if (score >= 75) {
+    return 'Critical matter signal'
+  }
+
+  if (score >= 55) {
+    return 'Leadership-visible matter signal'
+  }
+
+  if (score >= 35) {
+    return 'Elevated matter signal'
+  }
+
+  return 'Routine matter signal'
+}
+
+function buildMatterProfileContext(matterProfile: MatterProfile) {
+  const selections = getMatterProfileSelections(matterProfile)
+  const matterProfileScore = clamp(
+    Math.round((selections.reduce((sum, item) => sum + item.score, 0) / MATTER_PROFILE_SCORE_MAX) * 100),
+    0,
+    100
+  )
+
+  return [
+    'Client matter calibration:',
+    ...selections.map((item) => `- ${item.label}: ${item.selectedLabel} (score ${formatScore(item.score)})`),
+    `- Risk Profile: ${formatCurrency(matterProfile.riskProfile)} prepared exposure`,
+    `- Overall Matter Signal: ${matterProfileScore}/100 (${getMatterProfileSignalLabel(matterProfileScore)})`
+  ].join('\n')
+}
+
+function buildPricingSummary(analysis: AnalysisResult, answers: string[], matterProfile: MatterProfile): PricingSummary {
   const snapshots = analysis.questions.map((question, index) => {
     const answer = answers[index]?.trim() ?? ''
     const words = countWords(answer)
@@ -342,18 +487,53 @@ function buildPricingSummary(analysis: AnalysisResult, answers: string[]): Prici
 
   const totalDimensionScore = dimensionBaseScores.reduce((sum, dimension) => sum + dimension.score, 0)
   const answerDepthScore = clamp(Math.round(totalWords / 16), 0, 100)
-  const documentComplexityScore = clamp(
+  const baseDocumentComplexityScore = clamp(
     Math.round(answerDepthScore * 0.55 + completionPercent * 0.25 + totalDimensionScore / 8),
     20,
     96
   )
 
-  const valueAtStake = roundCurrency(
+  const matterProfileSelections = getMatterProfileSelections(matterProfile)
+  const matterProfileRawScore = matterProfileSelections.reduce((sum, item) => sum + item.score, 0)
+  const matterProfileScore = clamp(
+    Math.round((matterProfileRawScore / MATTER_PROFILE_SCORE_MAX) * 100),
+    0,
+    100
+  )
+  const matterProfileSignalLabel = getMatterProfileSignalLabel(matterProfileScore)
+  const matterProfileAdjustment = Number((1 + matterProfileScore / 180).toFixed(2))
+
+  const clientComplexitySignal = clamp(
+    Math.round(
+      (matterProfileSelections[2]?.score ?? 1) / 3 * 34 +
+      (matterProfileSelections[1]?.score ?? 1) / 3 * 18 +
+      (matterProfileSelections[5]?.score ?? 1) / 4 * 16 +
+      (matterProfileSelections[4]?.score ?? 1) / 3 * 12 +
+      (matterProfileSelections[0]?.score ?? 1) / 4 * 10 +
+      (matterProfileSelections[3]?.score ?? 0.5) / 23 * 10
+    ),
+    0,
+    100
+  )
+
+  const documentComplexityScore = clamp(
+    Math.round(baseDocumentComplexityScore * 0.72 + clientComplexitySignal * 0.28),
+    20,
+    98
+  )
+
+  const baseValueAtStake = roundCurrency(
     totalDimensionScore * 90000 + totalWords * 2400 + answeredQuestions * 650000,
     25000
   )
+  const riskAnchoredValue = Math.max(baseValueAtStake, matterProfile.riskProfile)
+  const valueAtStake = roundCurrency(riskAnchoredValue * matterProfileAdjustment, 25000)
 
-  const exposurePercent = clamp(0.45 + documentComplexityScore / 12, 0.6, 8.5)
+  const exposurePercent = clamp(
+    0.45 + documentComplexityScore / 12 + matterProfileScore / 55,
+    0.6,
+    9.5
+  )
 
   let feeBandLowPercent = 0.8
   let feeBandHighPercent = 2
@@ -461,6 +641,7 @@ function buildPricingSummary(analysis: AnalysisResult, answers: string[]): Prici
     averageWords,
     completionPercent,
     marketSignalLabel,
+    baseValueAtStake,
     valueAtStake,
     exposurePercent,
     feeBandLowPercent,
@@ -471,6 +652,10 @@ function buildPricingSummary(analysis: AnalysisResult, answers: string[]): Prici
     recommendedPrice,
     documentComplexityScore,
     biggestDriver,
+    matterProfileScore,
+    matterProfileAdjustment,
+    matterProfileSignalLabel,
+    riskProfile: matterProfile.riskProfile,
     dimensions,
     units,
     highlights,
@@ -493,6 +678,7 @@ export default function Home() {
   const [analysisError, setAnalysisError] = useState('')
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [analysisAttempt, setAnalysisAttempt] = useState(0)
+  const [matterProfile, setMatterProfile] = useState<MatterProfile>(DEFAULT_MATTER_PROFILE)
   const [analysisProgress, setAnalysisProgress] = useState<QuestionPlanProgressPayload>({
     stageId: INITIAL_STAGE_ID,
     ...QUESTION_PLAN_STAGE_DETAILS[INITIAL_STAGE_ID]
@@ -506,14 +692,24 @@ export default function Home() {
   const currentQuestion = questions[currentQuestionIndex]
   const currentAnswer = answers[currentQuestionIndex] ?? ''
   const completedQuestionCount = questions.filter((_, index) => Boolean(answers[index]?.trim())).length
-  const pricingSummary = analysis ? buildPricingSummary(analysis, answers) : null
+  const matterProfileSelections = getMatterProfileSelections(matterProfile)
+  const matterProfileScore = clamp(
+    Math.round((matterProfileSelections.reduce((sum, item) => sum + item.score, 0) / MATTER_PROFILE_SCORE_MAX) * 100),
+    0,
+    100
+  )
+  const matterProfileSignalLabel = getMatterProfileSignalLabel(matterProfileScore)
+  const pricingSummary = analysis ? buildPricingSummary(analysis, answers, matterProfile) : null
 
-  const resetAnalysis = () => {
+  const resetAnalysis = ({ resetMatterProfile = false }: { resetMatterProfile?: boolean } = {}) => {
     setAnalysis(null)
     setAnalysisError('')
     setCurrentQuestionIndex(0)
     setAnswers([])
     setAnalysisAttempt(0)
+    if (resetMatterProfile) {
+      setMatterProfile(DEFAULT_MATTER_PROFILE)
+    }
     setAnalysisProgress({
       stageId: INITIAL_STAGE_ID,
       ...QUESTION_PLAN_STAGE_DETAILS[INITIAL_STAGE_ID]
@@ -527,6 +723,8 @@ export default function Home() {
     if (selectedCompany?.ticker) {
       formData.append('companyTicker', selectedCompany.ticker)
     }
+
+    formData.append('matterProfileContext', buildMatterProfileContext(matterProfile))
 
     uploadedFiles.forEach((file) => {
       formData.append('documents', file)
@@ -557,7 +755,7 @@ export default function Home() {
       })
 
       if (!response.ok) {
-        let message = 'Failed to generate step 4 questions'
+        let message = 'Failed to generate review questions'
 
         try {
           const payload = (await response.json()) as { error?: string }
@@ -566,7 +764,7 @@ export default function Home() {
           try {
             message = await response.text()
           } catch {
-            message = 'Failed to generate step 4 questions'
+            message = 'Failed to generate review questions'
           }
         }
 
@@ -620,7 +818,7 @@ export default function Home() {
         }
       }
 
-      throw createRequestError('The analysis stream ended before returning step 4 questions.')
+      throw createRequestError('The analysis stream ended before returning review questions.')
     } finally {
       clearTimeout(timeout)
     }
@@ -629,14 +827,14 @@ export default function Home() {
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (event.target.files) {
       const newFiles = Array.from(event.target.files)
-      resetAnalysis()
+      resetAnalysis({ resetMatterProfile: true })
       setUploadedFiles((prev) => [...prev, ...newFiles])
       event.target.value = ''
     }
   }
 
   const removeFile = (index: number) => {
-    resetAnalysis()
+    resetAnalysis({ resetMatterProfile: true })
     setUploadedFiles((prev) => prev.filter((_, itemIndex) => itemIndex !== index))
   }
 
@@ -707,7 +905,7 @@ export default function Home() {
     resetAnalysis()
     setIsOpen(false)
     setIsAnalyzing(true)
-    setStep(3)
+    setStep(4)
 
     try {
       for (let attempt = 1; attempt <= QUESTION_PLAN_MAX_ATTEMPTS; attempt += 1) {
@@ -724,10 +922,10 @@ export default function Home() {
           setAnalysis(payload)
           setAnswers(Array.from({ length: payload.questions.length }, () => ''))
           setCurrentQuestionIndex(0)
-          setStep(4)
-          toast.success('Step 4 questions ready', {
+          setStep(5)
+          toast.success('Review questions ready', {
             id: ANALYSIS_TOAST_ID,
-            description: `Generated ${payload.questions.length} tailored prompts for ${payload.company.name}.`
+            description: `Generated ${payload.questions.length} tailored prompts for ${payload.company.name} using the matter inputs and uploaded materials.`
           })
           return
         } catch (error) {
@@ -776,11 +974,26 @@ export default function Home() {
       return
     }
 
-    setStep(5)
+    setStep(6)
+  }
+
+  const handlePreviousQuestion = () => {
+    if (currentQuestionIndex > 0) {
+      setCurrentQuestionIndex((prev) => prev - 1)
+      return
+    }
+
+    setStep(3)
   }
 
   const containerWidth =
-    step === 5 ? 'max-w-[960px]' : step === 4 ? 'max-w-[620px]' : 'max-w-[440px]'
+    step === 6
+      ? 'max-w-[960px]'
+      : step === 5
+        ? 'max-w-[620px]'
+        : step === 3
+          ? 'max-w-[780px]'
+          : 'max-w-[440px]'
 
   return (
     <div className="min-h-screen bg-[#f4f4f5] flex items-center justify-center p-6 font-sans">
@@ -816,7 +1029,7 @@ export default function Home() {
                     label="Company name"
                     value={query}
                     onChange={(value) => {
-                      resetAnalysis()
+                      resetAnalysis({ resetMatterProfile: true })
                       setQuery(value)
                       setSelectedCompany(null)
                       setIsOpen(true)
@@ -830,7 +1043,7 @@ export default function Home() {
                           key={company.ticker}
                           className="flex flex-col w-full px-4 py-3 text-left hover:bg-zinc-50 border-b border-zinc-100 last:border-none"
                           onClick={() => {
-                            resetAnalysis()
+                            resetAnalysis({ resetMatterProfile: true })
                             setQuery(company.title)
                             setSelectedCompany(company)
                             setIsOpen(false)
@@ -849,7 +1062,7 @@ export default function Home() {
                       return
                     }
 
-                    resetAnalysis()
+                    resetAnalysis({ resetMatterProfile: true })
                     setStep(2)
                   }}
                   className="h-12 w-full rounded-2xl border border-zinc-300 bg-white text-[15px] font-medium text-zinc-900 hover:bg-zinc-50 transition-colors"
@@ -907,19 +1120,216 @@ export default function Home() {
                     Back
                   </button>
                   <button
-                    onClick={handleAnalyze}
-                    disabled={uploadedFiles.length === 0 || isAnalyzing}
+                    onClick={() => {
+                      if (uploadedFiles.length === 0) {
+                        return
+                      }
+
+                      setStep(3)
+                    }}
+                    disabled={uploadedFiles.length === 0}
                     className="h-12 flex-[2] rounded-2xl bg-emerald-600 text-white font-medium shadow-sm hover:bg-emerald-700 disabled:opacity-50"
                   >
-                    Analyze {uploadedFiles.length} {uploadedFiles.length === 1 ? 'Document' : 'Documents'}
+                    Next
                   </button>
                 </div>
               </motion.div>
             )}
 
-            {step === 3 && (
+            {step === 3 && analysis && (
               <motion.div
                 key="step3"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="space-y-6"
+              >
+                <div className="rounded-[28px] border border-zinc-200 bg-white p-6 shadow-sm">
+                  <div className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
+                    <div className="max-w-[520px]">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-400">
+                        Matter Inputs
+                      </p>
+                      <h1 className="mt-3 text-[24px] font-semibold tracking-tight text-zinc-900">
+                        Calibrate the matter before Gemini runs
+                      </h1>
+                      <p className="mt-2 text-[14px] leading-relaxed text-zinc-600">
+                        These inputs are sent with the filing and uploaded materials so Gemini can tailor the question set to the client&apos;s business context.
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-400">
+                        Matter Signal
+                      </p>
+                      <p className="mt-1 text-[24px] font-semibold text-zinc-900">{matterProfileScore}/100</p>
+                      <p className="text-[12px] text-zinc-500">{matterProfileSignalLabel}</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  <MatterSliderCard
+                    title="Business Impact"
+                    options={BUSINESS_IMPACT_OPTIONS}
+                    value={matterProfile.businessImpactIndex}
+                    onValueChange={(value) =>
+                      setMatterProfile((prev) => ({ ...prev, businessImpactIndex: value }))
+                    }
+                  />
+                  <MatterSliderCard
+                    title="Footprint"
+                    options={FOOTPRINT_OPTIONS}
+                    value={matterProfile.footprintIndex}
+                    onValueChange={(value) =>
+                      setMatterProfile((prev) => ({ ...prev, footprintIndex: value }))
+                    }
+                  />
+                  <MatterSliderCard
+                    title="Complexity"
+                    options={COMPLEXITY_OPTIONS}
+                    value={matterProfile.complexityIndex}
+                    onValueChange={(value) =>
+                      setMatterProfile((prev) => ({ ...prev, complexityIndex: value }))
+                    }
+                  />
+                  <MatterSliderCard
+                    title="Urgency"
+                    options={URGENCY_OPTIONS}
+                    value={matterProfile.urgencyIndex}
+                    onValueChange={(value) =>
+                      setMatterProfile((prev) => ({ ...prev, urgencyIndex: value }))
+                    }
+                  />
+                  <RiskProfileCard
+                    className="md:col-span-2"
+                    value={matterProfile.riskProfile}
+                    onValueChange={(value) =>
+                      setMatterProfile((prev) => ({ ...prev, riskProfile: value }))
+                    }
+                  />
+                  <MatterSliderCard
+                    title="Counterparty"
+                    options={COUNTERPARTY_OPTIONS}
+                    value={matterProfile.counterpartyIndex}
+                    onValueChange={(value) =>
+                      setMatterProfile((prev) => ({ ...prev, counterpartyIndex: value }))
+                    }
+                  />
+                  <MatterSliderCard
+                    title="Visibility"
+                    options={VISIBILITY_OPTIONS}
+                    value={matterProfile.visibilityIndex}
+                    onValueChange={(value) =>
+                      setMatterProfile((prev) => ({ ...prev, visibilityIndex: value }))
+                    }
+                  />
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setStep(2)}
+                    className="h-12 flex-1 rounded-2xl border border-zinc-300 bg-white font-medium text-zinc-900"
+                  >
+                    Back
+                  </button>
+                  <button
+                    onClick={handleAnalyze}
+                    disabled={uploadedFiles.length === 0 || isAnalyzing}
+                    className="h-12 flex-[2] rounded-2xl bg-zinc-900 text-white font-medium shadow-sm hover:bg-zinc-800 disabled:opacity-50"
+                  >
+                    {analysis ? 'Regenerate Questions' : 'Generate Questions'}
+                  </button>
+                </div>
+              </motion.div>
+            )}
+
+            {step === 3 && !analysis && (
+              <motion.div
+                key="step3-empty"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="space-y-6"
+              >
+                <div className="grid gap-4 md:grid-cols-2">
+                  <MatterSliderCard
+                    title="Business Impact"
+                    options={BUSINESS_IMPACT_OPTIONS}
+                    value={matterProfile.businessImpactIndex}
+                    onValueChange={(value) =>
+                      setMatterProfile((prev) => ({ ...prev, businessImpactIndex: value }))
+                    }
+                  />
+                  <MatterSliderCard
+                    title="Footprint"
+                    options={FOOTPRINT_OPTIONS}
+                    value={matterProfile.footprintIndex}
+                    onValueChange={(value) =>
+                      setMatterProfile((prev) => ({ ...prev, footprintIndex: value }))
+                    }
+                  />
+                  <MatterSliderCard
+                    title="Complexity"
+                    options={COMPLEXITY_OPTIONS}
+                    value={matterProfile.complexityIndex}
+                    onValueChange={(value) =>
+                      setMatterProfile((prev) => ({ ...prev, complexityIndex: value }))
+                    }
+                  />
+                  <MatterSliderCard
+                    title="Urgency"
+                    options={URGENCY_OPTIONS}
+                    value={matterProfile.urgencyIndex}
+                    onValueChange={(value) =>
+                      setMatterProfile((prev) => ({ ...prev, urgencyIndex: value }))
+                    }
+                  />
+                  <RiskProfileCard
+                    className="md:col-span-2"
+                    value={matterProfile.riskProfile}
+                    onValueChange={(value) =>
+                      setMatterProfile((prev) => ({ ...prev, riskProfile: value }))
+                    }
+                  />
+                  <MatterSliderCard
+                    title="Counterparty"
+                    options={COUNTERPARTY_OPTIONS}
+                    value={matterProfile.counterpartyIndex}
+                    onValueChange={(value) =>
+                      setMatterProfile((prev) => ({ ...prev, counterpartyIndex: value }))
+                    }
+                  />
+                  <MatterSliderCard
+                    title="Visibility"
+                    options={VISIBILITY_OPTIONS}
+                    value={matterProfile.visibilityIndex}
+                    onValueChange={(value) =>
+                      setMatterProfile((prev) => ({ ...prev, visibilityIndex: value }))
+                    }
+                  />
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setStep(2)}
+                    className="h-12 flex-1 rounded-2xl border border-zinc-300 bg-white font-medium text-zinc-900"
+                  >
+                    Back
+                  </button>
+                  <button
+                    onClick={handleAnalyze}
+                    disabled={uploadedFiles.length === 0 || isAnalyzing}
+                    className="h-12 flex-[2] rounded-2xl bg-zinc-900 text-white font-medium shadow-sm hover:bg-zinc-800 disabled:opacity-50"
+                  >
+                    {analysis ? 'Regenerate Questions' : 'Generate Questions'}
+                  </button>
+                </div>
+              </motion.div>
+            )}
+
+            {step === 4 && (
+              <motion.div
+                key="step4"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
@@ -1068,7 +1478,7 @@ export default function Home() {
                     </div>
                     <div className="flex gap-3">
                       <button
-                        onClick={() => setStep(2)}
+                        onClick={() => setStep(3)}
                         className="h-11 px-5 rounded-xl border border-zinc-300 bg-white text-zinc-900 text-[14px] font-medium"
                       >
                         Back
@@ -1085,9 +1495,9 @@ export default function Home() {
               </motion.div>
             )}
 
-            {step === 4 && currentQuestion && analysis && (
+            {step === 5 && currentQuestion && analysis && (
               <motion.div
-                key="step4"
+                key="step5"
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -10 }}
@@ -1105,17 +1515,22 @@ export default function Home() {
                     ))}
                   </div>
                   <div className="flex items-center justify-between gap-4">
-                    <p className="text-[12px] text-zinc-500 leading-relaxed">
-                      Question plan generated from {analysis.company.name}&apos;s {pricingSummary?.filingDateLabel} 10-K.{' '}
-                      <a
-                        href={analysis.latestTenK.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-emerald-700 hover:text-emerald-800 underline underline-offset-2"
-                      >
-                        View filing
-                      </a>
-                    </p>
+                    <div className="space-y-1">
+                      <p className="text-[12px] text-zinc-500 leading-relaxed">
+                        Question plan generated from {analysis.company.name}&apos;s {pricingSummary?.filingDateLabel} 10-K.{' '}
+                        <a
+                          href={analysis.latestTenK.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-emerald-700 hover:text-emerald-800 underline underline-offset-2"
+                        >
+                          View filing
+                        </a>
+                      </p>
+                      <p className="text-[12px] text-zinc-500">
+                        {matterProfileSignalLabel} · risk anchor {formatCurrency(matterProfile.riskProfile)}
+                      </p>
+                    </div>
                     <span className="text-[12px] text-zinc-400 font-medium">
                       {completedQuestionCount} / {questions.length}
                     </span>
@@ -1163,11 +1578,10 @@ export default function Home() {
 
                 <div className="flex items-center justify-between gap-4">
                   <button
-                    disabled={currentQuestionIndex === 0}
-                    onClick={() => setCurrentQuestionIndex((prev) => Math.max(0, prev - 1))}
+                    onClick={handlePreviousQuestion}
                     className="h-11 px-4 rounded-xl border border-zinc-300 bg-white text-zinc-900 text-[14px] font-medium disabled:opacity-50"
                   >
-                    Previous
+                    {currentQuestionIndex === 0 ? 'Matter Inputs' : 'Previous'}
                   </button>
                   <p className="text-[12px] text-zinc-400 font-medium uppercase tracking-wider">
                     Question {currentQuestionIndex + 1} of {questions.length}
@@ -1183,9 +1597,9 @@ export default function Home() {
               </motion.div>
             )}
 
-            {step === 5 && analysis && pricingSummary && (
+            {step === 6 && analysis && pricingSummary && (
               <motion.div
-                key="step5"
+                key="step6"
                 initial={{ opacity: 0, y: 12 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -12 }}
@@ -1198,11 +1612,11 @@ export default function Home() {
                         {analysis.company.name} Value Pricing Output
                       </h2>
                       <p className="text-[13px] text-zinc-500 mt-1">
-                        Client-side preview based on the uploaded materials and the completed questions. Firm-side inputs would refine the point within the band.
+                        Client-side preview based on the uploaded materials, the slider inputs, and the completed questions. Firm-side inputs would refine the point within the band.
                       </p>
                     </div>
                     <button
-                      onClick={() => setStep(4)}
+                      onClick={() => setStep(5)}
                       className="inline-flex items-center gap-2 rounded-lg border border-zinc-200 px-3 py-2 text-[12px] font-medium text-zinc-600 hover:bg-zinc-50"
                     >
                       <ArrowLeft className="h-4 w-4" />
@@ -1225,11 +1639,16 @@ export default function Home() {
                     </p>
                   </div>
 
-                  <div className="grid gap-4 p-5 md:grid-cols-3 border-b border-zinc-200">
+                  <div className="grid gap-4 border-b border-zinc-200 p-5 md:grid-cols-2 xl:grid-cols-4">
                     <MetricCard
                       label="Estimated Value At Stake"
                       value={formatCurrency(pricingSummary.valueAtStake)}
-                      detail={`Exposure proxy ${formatPercent(pricingSummary.exposurePercent)}`}
+                      detail={`Base signal ${formatCurrency(pricingSummary.baseValueAtStake)}`}
+                    />
+                    <MetricCard
+                      label="Client Risk Anchor"
+                      value={formatCurrency(pricingSummary.riskProfile)}
+                      detail={pricingSummary.matterProfileSignalLabel}
                     />
                     <MetricCard
                       label="Fee Band"
@@ -1237,9 +1656,9 @@ export default function Home() {
                       detail="Mapped from the indicative deck curve"
                     />
                     <MetricCard
-                      label="Document Complexity"
+                      label="Matter Complexity"
                       value={`${pricingSummary.documentComplexityScore}/100`}
-                      detail={`${pricingSummary.answeredQuestions}/${pricingSummary.totalQuestions} questions answered`}
+                      detail={`Exposure proxy ${formatPercent(pricingSummary.exposurePercent)}`}
                     />
                   </div>
 
@@ -1302,6 +1721,35 @@ export default function Home() {
 
                   <div className="p-5 border-b border-zinc-200">
                     <SectionTitle
+                      title="Client Intake"
+                      subtitle="Structured matter inputs captured before the written review questions."
+                    />
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {matterProfileSelections.map((item) => (
+                        <div key={item.label} className="rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
+                          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-400">
+                            {item.label}
+                          </p>
+                          <p className="mt-2 text-[14px] font-semibold text-zinc-900">{item.selectedLabel}</p>
+                          <p className="mt-1 text-[12px] text-zinc-500">Weight {formatScore(item.score)}</p>
+                        </div>
+                      ))}
+                      <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-400">
+                          Risk Profile
+                        </p>
+                        <p className="mt-2 text-[14px] font-semibold text-zinc-900">
+                          {formatCurrency(pricingSummary.riskProfile)}
+                        </p>
+                        <p className="mt-1 text-[12px] text-zinc-500">
+                          Adjustment factor {pricingSummary.matterProfileAdjustment.toFixed(2)}x
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-5 border-b border-zinc-200">
+                    <SectionTitle
                       title="Input Transparency"
                       subtitle="The most detailed answers driving the recommendation."
                     />
@@ -1329,6 +1777,7 @@ export default function Home() {
                     <div className="space-y-3">
                       <SummaryRow label="Latest 10-K" value={`${pricingSummary.filingDateLabel} filing`} />
                       <SummaryRow label="Primary value driver" value={pricingSummary.biggestDriver} />
+                      <SummaryRow label="Matter signal" value={`${pricingSummary.matterProfileScore}/100`} />
                       <SummaryRow label="Average response depth" value={`${pricingSummary.averageWords} words per answer`} />
                       <SummaryRow label="Recommended point" value={formatCurrency(pricingSummary.recommendedPrice)} />
                     </div>
@@ -1343,7 +1792,7 @@ export default function Home() {
                         View filing
                       </a>
                       <button
-                        onClick={() => setStep(4)}
+                        onClick={() => setStep(5)}
                         className="inline-flex items-center gap-2 rounded-xl bg-zinc-900 px-4 py-3 text-[13px] font-medium text-white hover:bg-zinc-800"
                       >
                         Refine Answers
@@ -1382,6 +1831,137 @@ function Field({
         placeholder={placeholder}
         className="w-full bg-transparent text-[15px] text-zinc-900 placeholder-zinc-400 focus:outline-none"
       />
+    </div>
+  )
+}
+
+function MatterSliderCard({
+  title,
+  options,
+  value,
+  onValueChange
+}: {
+  title: string
+  options: MatterProfileOption[]
+  value: number
+  onValueChange: (value: number) => void
+}) {
+  const selectedOption = options[value] ?? options[0]
+
+  return (
+    <div className="rounded-[26px] border border-zinc-200 bg-white p-5 shadow-sm space-y-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="text-[15px] font-semibold text-zinc-900">{title}</h2>
+          <p className="mt-1 text-[12px] text-zinc-500">Select the closest fit for this matter.</p>
+        </div>
+        <span className="inline-flex items-center rounded-full bg-zinc-100 px-3 py-1 text-[10px] font-medium text-zinc-700">
+          {selectedOption.label} · {formatScore(selectedOption.score)}
+        </span>
+      </div>
+
+      <Slider
+        max={options.length - 1}
+        min={0}
+        onValueChange={(nextValue) => onValueChange(clamp(Math.round(nextValue), 0, options.length - 1))}
+        step={1}
+        value={value}
+      />
+
+      <div className="flex flex-wrap gap-2">
+        {options.map((option, index) => {
+          const isActive = index === value
+
+          return (
+            <button
+              key={`${title}-${option.label}`}
+              type="button"
+              onClick={() => onValueChange(index)}
+              className={`rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors ${
+                isActive
+                  ? 'border-zinc-900 bg-zinc-900 text-white'
+                  : 'border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50'
+              }`}
+            >
+              {option.label}
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function RiskProfileCard({
+  className,
+  value,
+  onValueChange
+}: {
+  className?: string
+  value: number
+  onValueChange: (value: number) => void
+}) {
+  const marks = [
+    { label: '$0', value: 0 },
+    { label: '$50M', value: 50000000 },
+    { label: '$100M', value: 100000000 },
+    { label: '$250M', value: RISK_PROFILE_MAX }
+  ]
+
+  return (
+    <div className={`rounded-[26px] border border-zinc-200 bg-white p-5 shadow-sm space-y-4 ${className ?? ''}`}>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="text-[15px] font-semibold text-zinc-900">Risk Profile</h2>
+          <p className="mt-1 text-[12px] text-zinc-500">
+            What is the total dollar value you are prepared to expose?
+          </p>
+        </div>
+        <span className="inline-flex items-center rounded-full bg-zinc-100 px-3 py-1 text-[12px] font-medium text-zinc-700">
+          {formatCurrency(value)}
+        </span>
+      </div>
+
+      <Slider
+        max={RISK_PROFILE_MAX}
+        min={0}
+        onValueChange={(nextValue) => onValueChange(clamp(nextValue, 0, RISK_PROFILE_MAX))}
+        step={RISK_PROFILE_STEP}
+        value={value}
+      />
+
+      <div className="flex items-center justify-between text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-400">
+        {marks.map((mark) => (
+          <button
+            key={mark.value}
+            type="button"
+            onClick={() => onValueChange(mark.value)}
+            className="transition-colors hover:text-zinc-600"
+          >
+            {mark.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="space-y-2">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-400">Prepared Exposure</p>
+        <div className="relative">
+          <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[13px] text-zinc-400">$</span>
+          <Input
+            type="number"
+            min={0}
+            max={RISK_PROFILE_MAX}
+            step={RISK_PROFILE_STEP}
+            value={value}
+            onChange={(event) => {
+              const rawValue = event.target.value
+              const nextValue = rawValue === '' ? 0 : Number(rawValue)
+              onValueChange(clamp(Number.isNaN(nextValue) ? 0 : nextValue, 0, RISK_PROFILE_MAX))
+            }}
+            className="h-11 rounded-xl border-zinc-200 bg-white pl-7 text-[14px]"
+          />
+        </div>
+      </div>
     </div>
   )
 }

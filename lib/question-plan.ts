@@ -62,7 +62,7 @@ export const QUESTION_PLAN_STAGE_DETAILS: Record<
   },
   'finalizing-response': {
     title: 'Finalizing response',
-    description: 'Normalizing the output so step 4 opens with structured questions.'
+    description: 'Normalizing the output so the review flow opens with structured questions.'
   }
 }
 

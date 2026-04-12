@@ -367,6 +367,7 @@ async function generateQuestionPlan({
   companyTicker,
   filingDate,
   filingUrl,
+  matterProfileContext,
   tenKContext,
   documentParts,
   onProgress
@@ -375,6 +376,7 @@ async function generateQuestionPlan({
   companyTicker: string
   filingDate: string
   filingUrl: string
+  matterProfileContext: string
   tenKContext: string
   documentParts: GeminiPart[]
   onProgress?: (description: string) => void
@@ -387,18 +389,21 @@ async function generateQuestionPlan({
 
   const model = process.env.GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL
   const prompt = [
-    'You are preparing step 4 analyst questions for a document review workflow.',
+    'You are preparing structured analyst questions for a document review workflow.',
     '',
     `Company: ${companyName} (${companyTicker})`,
     `Latest 10-K filing date: ${filingDate}`,
     `Latest 10-K source: ${filingUrl}`,
     '',
+    matterProfileContext,
+    '',
     'Instructions:',
     '1. Use the 10-K excerpt to identify 3 to 6 real business units, operating segments, or product lines. Prefer the company’s own language.',
-    '2. Review the uploaded documents and produce exactly 4 questions for a reviewer to answer from those documents.',
-    '3. Each question must map to one business unit and should help a reviewer compare the uploaded documents against the priorities implied by the 10-K.',
-    '4. Ask only questions that can plausibly be answered from the uploaded documents. Avoid yes/no phrasing and avoid generic summary prompts.',
-    '5. Return JSON only with this shape:',
+    '2. Use the client matter calibration to emphasize the business units, risks, stakeholders, and urgency dimensions that appear most important.',
+    '3. Review the uploaded documents and produce exactly 4 questions for a reviewer to answer from those documents.',
+    '4. Each question must map to one business unit and should help a reviewer compare the uploaded documents against the priorities implied by the 10-K and client matter calibration.',
+    '5. Ask only questions that can plausibly be answered from the uploaded documents. Avoid yes/no phrasing and avoid generic summary prompts.',
+    '6. Return JSON only with this shape:',
     '{',
     '  "businessUnits": ["unit"],',
     '  "questions": [',
@@ -417,7 +422,7 @@ async function generateQuestionPlan({
       const heartbeat = setInterval(() => {
         const elapsedSeconds = Math.max(1, Math.round((Date.now() - requestStartedAt) / 1000))
         onProgress?.(`Waiting on Gemini to return structured questions. ${elapsedSeconds}s elapsed.`)
-      }, 4000)
+      }, 15000)
 
       try {
       const response = await fetchWithTimeout(
@@ -509,11 +514,17 @@ function createQuestionPlanStream(request: Request) {
             const formData = await request.formData()
             const companyNameValue = formData.get('companyName')
             const companyTickerValue = formData.get('companyTicker')
+            const matterProfileContextValue = formData.get('matterProfileContext')
             const rawDocuments = formData.getAll('documents')
 
             if (typeof companyNameValue !== 'string' || !companyNameValue.trim()) {
               throw new Error('companyName is required')
             }
+
+            const matterProfileContext =
+              typeof matterProfileContextValue === 'string' && matterProfileContextValue.trim()
+                ? matterProfileContextValue.trim()
+                : 'Client matter calibration: not provided.'
 
             const documents = rawDocuments.filter((entry): entry is File => entry instanceof File)
 
@@ -580,7 +591,7 @@ function createQuestionPlanStream(request: Request) {
             emitProgress({
               stageId: QUESTION_PLAN_STAGE_SEQUENCE[5],
               title: QUESTION_PLAN_STAGE_DETAILS['generating-questions'].title,
-              description: `Sending the filing context and uploaded materials to Gemini for ${company.title}.`
+              description: `Sending the filing context, client matter calibration, and uploaded materials to Gemini for ${company.title}.`
             })
 
             const plan = await generateQuestionPlan({
@@ -588,6 +599,7 @@ function createQuestionPlanStream(request: Request) {
               companyTicker: company.ticker,
               filingDate: latestTenK.filingDate,
               filingUrl: latestTenK.url,
+              matterProfileContext,
               tenKContext,
               documentParts,
               onProgress: (description) => {

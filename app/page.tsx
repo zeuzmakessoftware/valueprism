@@ -2,29 +2,104 @@
 
 import React, { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
+import { toast } from 'sonner'
+
+import {
+  type AnalysisResult,
+  type QuestionPlanCompletePayload,
+  type QuestionPlanErrorPayload,
+  type QuestionPlanProgressPayload,
+  QUESTION_PLAN_MAX_ATTEMPTS,
+  QUESTION_PLAN_STAGE_DETAILS,
+  QUESTION_PLAN_STAGE_SEQUENCE,
+  type QuestionPlanStageId
+} from '@/lib/question-plan'
 
 type Company = {
   ticker: string
   title: string
 }
 
-type AnalysisQuestion = {
-  businessUnit: string
-  question: string
+type RequestError = Error & {
+  status?: number
 }
 
-type AnalysisResult = {
-  company: {
-    name: string
-    ticker: string
+type ParsedSseMessage = {
+  event: string
+  data: unknown
+}
+
+const ANALYSIS_TOAST_ID = 'question-plan-analysis'
+const ANALYSIS_REQUEST_TIMEOUT_MS = 90000
+const INITIAL_STAGE_ID: QuestionPlanStageId = QUESTION_PLAN_STAGE_SEQUENCE[0]
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function createRequestError(message: string, status?: number) {
+  const error = new Error(message) as RequestError
+  error.status = status
+  return error
+}
+
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error && error.name === 'AbortError') {
+    return 'The analysis request timed out before the server finished streaming the result.'
   }
-  latestTenK: {
-    filingDate: string
-    accessionNumber: string
-    url: string
+
+  return error instanceof Error ? error.message : 'Failed to generate step 4 questions'
+}
+
+function isRetriableRequestError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false
   }
-  businessUnits: string[]
-  questions: AnalysisQuestion[]
+
+  const status =
+    'status' in error && typeof (error as { status?: unknown }).status === 'number'
+      ? (error as { status: number }).status
+      : undefined
+
+  if (status !== undefined) {
+    return status === 408 || status === 425 || status === 429 || status >= 500
+  }
+
+  return error.name === 'AbortError' || /timeout|timed out|fetch failed|network|stream ended/i.test(error.message)
+}
+
+function parseSseMessage(rawMessage: string): ParsedSseMessage | null {
+  const lines = rawMessage
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+
+  if (lines.length === 0 || lines[0].startsWith(':')) {
+    return null
+  }
+
+  let event = 'message'
+  const dataLines: string[] = []
+
+  for (const line of lines) {
+    if (line.startsWith('event:')) {
+      event = line.slice('event:'.length).trim()
+      continue
+    }
+
+    if (line.startsWith('data:')) {
+      dataLines.push(line.slice('data:'.length).trim())
+    }
+  }
+
+  if (dataLines.length === 0) {
+    return null
+  }
+
+  return {
+    event,
+    data: JSON.parse(dataLines.join('\n'))
+  }
 }
 
 export default function Home() {
@@ -41,12 +116,133 @@ export default function Home() {
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null)
   const [analysisError, setAnalysisError] = useState('')
   const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const [analysisAttempt, setAnalysisAttempt] = useState(0)
+  const [analysisProgress, setAnalysisProgress] = useState<QuestionPlanProgressPayload>({
+    stageId: INITIAL_STAGE_ID,
+    ...QUESTION_PLAN_STAGE_DETAILS[INITIAL_STAGE_ID]
+  })
+
+  const analysisStageIndex = Math.max(QUESTION_PLAN_STAGE_SEQUENCE.indexOf(analysisProgress.stageId), 0)
+  const analysisProgressPercent = ((analysisStageIndex + 1) / QUESTION_PLAN_STAGE_SEQUENCE.length) * 100
+  const isGeneratingQuestions = analysisProgress.stageId === 'generating-questions'
+  const completedStageIds = QUESTION_PLAN_STAGE_SEQUENCE.slice(0, analysisStageIndex)
 
   const resetAnalysis = () => {
     setAnalysis(null)
     setAnalysisError('')
     setCurrentQuestionIndex(0)
     setAnswer('')
+    setAnalysisAttempt(0)
+    setAnalysisProgress({
+      stageId: INITIAL_STAGE_ID,
+      ...QUESTION_PLAN_STAGE_DETAILS[INITIAL_STAGE_ID]
+    })
+  }
+
+  const buildAnalysisFormData = () => {
+    const formData = new FormData()
+    formData.append('companyName', query.trim())
+
+    if (selectedCompany?.ticker) {
+      formData.append('companyTicker', selectedCompany.ticker)
+    }
+
+    uploadedFiles.forEach((file) => {
+      formData.append('documents', file)
+    })
+
+    return formData
+  }
+
+  const updateAnalysisToast = (progress: QuestionPlanProgressPayload, attempt: number) => {
+    const attemptLabel = attempt > 1 ? ` Attempt ${attempt} of ${QUESTION_PLAN_MAX_ATTEMPTS}.` : ''
+
+    toast.loading(progress.title, {
+      id: ANALYSIS_TOAST_ID,
+      description: `${progress.description}${attemptLabel}`.trim(),
+      duration: Infinity
+    })
+  }
+
+  const requestQuestionPlanStream = async (attempt: number) => {
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => controller.abort(), ANALYSIS_REQUEST_TIMEOUT_MS)
+
+    try {
+      const response = await fetch('/api/question-plan', {
+        method: 'POST',
+        body: buildAnalysisFormData(),
+        signal: controller.signal
+      })
+
+      if (!response.ok) {
+        let message = 'Failed to generate step 4 questions'
+
+        try {
+          const payload = (await response.json()) as { error?: string }
+          message = payload.error ?? message
+        } catch {
+          try {
+            message = await response.text()
+          } catch {
+            message = 'Failed to generate step 4 questions'
+          }
+        }
+
+        throw createRequestError(message, response.status)
+      }
+
+      if (!response.body) {
+        throw createRequestError('The analysis stream did not return a readable response body.')
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+
+        if (done) {
+          break
+        }
+
+        buffer += decoder.decode(value, { stream: true }).replace(/\r/g, '')
+
+        let boundaryIndex = buffer.indexOf('\n\n')
+
+        while (boundaryIndex !== -1) {
+          const rawMessage = buffer.slice(0, boundaryIndex)
+          buffer = buffer.slice(boundaryIndex + 2)
+
+          const parsed = parseSseMessage(rawMessage)
+
+          if (parsed) {
+            if (parsed.event === 'progress') {
+              const progress = parsed.data as QuestionPlanProgressPayload
+              setAnalysisProgress(progress)
+              updateAnalysisToast(progress, attempt)
+            }
+
+            if (parsed.event === 'complete') {
+              const payload = parsed.data as QuestionPlanCompletePayload
+              return payload.result
+            }
+
+            if (parsed.event === 'error') {
+              const payload = parsed.data as QuestionPlanErrorPayload
+              throw createRequestError(payload.message, 500)
+            }
+          }
+
+          boundaryIndex = buffer.indexOf('\n\n')
+        }
+      }
+
+      throw createRequestError('The analysis stream ended before returning step 4 questions.')
+    } finally {
+      clearTimeout(timeout)
+    }
   }
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -68,9 +264,9 @@ export default function Home() {
       try {
         const res = await fetch('/api/tickers')
         const data = (await res.json()) as Record<string, Company>
-        const list = Object.values(data).map((c) => ({
-          ticker: c.ticker,
-          title: c.title
+        const list = Object.values(data).map((company) => ({
+          ticker: company.ticker,
+          title: company.title
         }))
         setCompanies(list)
       } catch (err) {
@@ -98,6 +294,12 @@ export default function Home() {
     setFiltered(results)
   }, [query, companies])
 
+  useEffect(() => {
+    return () => {
+      toast.dismiss(ANALYSIS_TOAST_ID)
+    }
+  }, [])
+
   const handleAnalyze = async () => {
     if (!query.trim() || uploadedFiles.length === 0 || isAnalyzing) {
       return
@@ -109,32 +311,47 @@ export default function Home() {
     setStep(3)
 
     try {
-      const formData = new FormData()
-      formData.append('companyName', query.trim())
+      for (let attempt = 1; attempt <= QUESTION_PLAN_MAX_ATTEMPTS; attempt += 1) {
+        setAnalysisAttempt(attempt)
+        const initialProgress: QuestionPlanProgressPayload = {
+          stageId: INITIAL_STAGE_ID,
+          ...QUESTION_PLAN_STAGE_DETAILS[INITIAL_STAGE_ID]
+        }
+        setAnalysisProgress(initialProgress)
+        updateAnalysisToast(initialProgress, attempt)
 
-      if (selectedCompany?.ticker) {
-        formData.append('companyTicker', selectedCompany.ticker)
+        try {
+          const payload = await requestQuestionPlanStream(attempt)
+          setAnalysis(payload)
+          setStep(4)
+          toast.success('Step 4 questions ready', {
+            id: ANALYSIS_TOAST_ID,
+            description: `Generated ${payload.questions.length} tailored prompts for ${payload.company.name}.`
+          })
+          return
+        } catch (error) {
+          const canRetry = attempt < QUESTION_PLAN_MAX_ATTEMPTS && isRetriableRequestError(error)
+
+          if (!canRetry) {
+            throw error
+          }
+
+          toast.loading('Retrying analysis', {
+            id: ANALYSIS_TOAST_ID,
+            description: `Transient issue detected. Starting attempt ${attempt + 1} of ${QUESTION_PLAN_MAX_ATTEMPTS}.`,
+            duration: Infinity
+          })
+
+          await sleep(900 * attempt)
+        }
       }
-
-      uploadedFiles.forEach((file) => {
-        formData.append('documents', file)
-      })
-
-      const res = await fetch('/api/question-plan', {
-        method: 'POST',
-        body: formData
-      })
-      const payload = await res.json()
-
-      if (!res.ok) {
-        throw new Error(payload.error ?? 'Failed to generate step 4 questions')
-      }
-
-      setAnalysis(payload)
-      setStep(4)
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to generate step 4 questions'
+      const message = getErrorMessage(err)
       setAnalysisError(message)
+      toast.error('Analysis failed', {
+        id: ANALYSIS_TOAST_ID,
+        description: message
+      })
     } finally {
       setIsAnalyzing(false)
     }
@@ -148,7 +365,9 @@ export default function Home() {
       setCurrentQuestionIndex((prev) => prev + 1)
       setAnswer('')
     } else {
-      alert('Analysis Complete!')
+      toast.success('Analysis complete', {
+        description: 'The review flow reached the end of the generated questions.'
+      })
     }
   }
 
@@ -170,7 +389,7 @@ export default function Home() {
           </div>
         </div>
 
-        <div className="relative min-h-[400px]">
+        <div className="relative min-h-[460px]">
           <AnimatePresence mode="wait">
             {step === 1 && (
               <motion.div
@@ -247,7 +466,10 @@ export default function Home() {
                     <p className="text-[12px] font-semibold text-zinc-500 uppercase tracking-wider">Uploaded Files</p>
                     <div className="max-h-40 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
                       {uploadedFiles.map((file, idx) => (
-                        <div key={`${file.name}-${idx}`} className="flex items-center justify-between p-3 bg-white border border-zinc-200 rounded-xl">
+                        <div
+                          key={`${file.name}-${idx}`}
+                          className="flex items-center justify-between p-3 bg-white border border-zinc-200 rounded-xl"
+                        >
                           <div className="flex flex-col overflow-hidden">
                             <span className="text-[13px] font-medium text-zinc-900 truncate">{file.name}</span>
                             <span className="text-[11px] text-zinc-500">{(file.size / 1024).toFixed(1)} KB</span>
@@ -284,15 +506,129 @@ export default function Home() {
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                className="flex flex-col items-center justify-center py-16 text-center space-y-6"
+                className="flex flex-col items-center justify-center py-6 text-center space-y-6"
               >
                 {isAnalyzing ? (
-                  <>
-                    <div className="w-10 h-10 border-4 border-emerald-100 border-t-emerald-600 rounded-full animate-spin" />
-                    <h2 className="text-[18px] font-medium text-zinc-900 max-w-[280px] leading-snug">
-                      Analyzing your documents against the company&apos;s latest 10-K
-                    </h2>
-                  </>
+                  <div className="w-full rounded-[28px] border border-zinc-200 bg-white p-6 shadow-sm space-y-5 text-left">
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="space-y-2">
+                        {analysisAttempt > 1 && (
+                          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-700">
+                            Attempt {analysisAttempt} of {QUESTION_PLAN_MAX_ATTEMPTS}
+                          </p>
+                        )}
+                        <h2 className="text-[22px] font-semibold text-zinc-900 leading-tight">
+                          {analysisProgress.title}
+                        </h2>
+                        <p className="text-[14px] text-zinc-600 leading-relaxed">
+                          {analysisProgress.description}
+                        </p>
+                      </div>
+                      <div className="mt-1 flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700">
+                        <div className="w-5 h-5 border-2 border-emerald-200 border-t-emerald-600 rounded-full animate-spin" />
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-[11px] font-medium uppercase tracking-[0.18em] text-zinc-400">
+                        <span>Pipeline Activity</span>
+                        <span>{Math.round(analysisProgressPercent)}%</span>
+                      </div>
+                      <div className="h-2 rounded-full bg-zinc-100 overflow-hidden">
+                        <motion.div
+                          animate={{ width: `${analysisProgressPercent}%` }}
+                          className="h-full rounded-full bg-emerald-500"
+                        />
+                      </div>
+                    </div>
+
+                    {isGeneratingQuestions ? (
+                      <div className="space-y-4">
+                        <div className="rounded-3xl border border-emerald-200 bg-emerald-50 p-4 space-y-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <p className="text-[18px] font-semibold text-emerald-950">
+                                {QUESTION_PLAN_STAGE_DETAILS['generating-questions'].title}
+                              </p>
+                            </div>
+                            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white text-emerald-700">
+                              <div className="w-5 h-5 border-2 border-emerald-200 border-t-emerald-600 rounded-full animate-spin" />
+                            </div>
+                          </div>
+                          <p className="text-[14px] leading-relaxed text-emerald-900">
+                            {analysisProgress.description}
+                          </p>
+                          <p className="text-[12px] leading-relaxed text-emerald-800/80">
+                            Earlier SEC and document-prep stages are complete. The UI is now focused on Gemini until it returns the structured question set.
+                          </p>
+                        </div>
+
+                        <div className="space-y-2">
+                          <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-zinc-400">
+                            Completed So Far
+                          </p>
+                          <div className="flex flex-wrap gap-2">
+                            {completedStageIds.map((stageId) => (
+                              <span
+                                key={stageId}
+                                className="inline-flex items-center rounded-full border border-zinc-200 bg-zinc-50 px-3 py-1 text-[11px] font-medium uppercase tracking-wide text-zinc-600"
+                              >
+                                {QUESTION_PLAN_STAGE_DETAILS[stageId].title}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3">
+                          <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-zinc-400">
+                            Next
+                          </p>
+                          <p className="mt-1 text-[13px] font-medium text-zinc-800">
+                            {QUESTION_PLAN_STAGE_DETAILS['finalizing-response'].title}
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {QUESTION_PLAN_STAGE_SEQUENCE.map((stageId, index) => {
+                          const details = QUESTION_PLAN_STAGE_DETAILS[stageId]
+                          const state =
+                            index < analysisStageIndex ? 'complete' : index === analysisStageIndex ? 'active' : 'pending'
+                          const description =
+                            stageId === analysisProgress.stageId ? analysisProgress.description : details.description
+
+                          return (
+                            <div
+                              key={stageId}
+                              className={`flex items-center gap-3 rounded-2xl px-3 py-2 transition-colors ${
+                                state === 'active'
+                                  ? 'bg-emerald-50 text-emerald-900'
+                                  : state === 'complete'
+                                    ? 'bg-zinc-50 text-zinc-700'
+                                    : 'text-zinc-400'
+                              }`}
+                            >
+                              <div
+                                className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-[11px] font-semibold ${
+                                  state === 'active'
+                                    ? 'border-emerald-200 bg-white text-emerald-700'
+                                    : state === 'complete'
+                                      ? 'border-zinc-200 bg-white text-zinc-700'
+                                      : 'border-zinc-200 bg-zinc-100 text-zinc-400'
+                                }`}
+                              >
+                                {state === 'complete' ? '✓' : index + 1}
+                              </div>
+                              <div className="min-w-0">
+                                <p className="text-[13px] font-medium">{details.title}</p>
+                                <p className="text-[12px] leading-relaxed opacity-80">{description}</p>
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
                 ) : (
                   <>
                     <div className="w-14 h-14 rounded-full bg-red-50 border border-red-100 flex items-center justify-center text-red-500">
@@ -307,6 +643,11 @@ export default function Home() {
                       <p className="text-[14px] text-zinc-600 max-w-[320px] leading-relaxed">
                         {analysisError || 'The question planner did not return a usable result.'}
                       </p>
+                      {analysisAttempt > 0 && (
+                        <p className="text-[12px] uppercase tracking-[0.18em] text-zinc-400">
+                          Stopped after {analysisAttempt} {analysisAttempt === 1 ? 'attempt' : 'attempts'}
+                        </p>
+                      )}
                     </div>
                     <div className="flex gap-3">
                       <button

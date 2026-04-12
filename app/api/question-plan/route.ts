@@ -1,5 +1,12 @@
-import { NextResponse } from 'next/server'
-
+import {
+  type AnalysisResult,
+  type QuestionPlanCompletePayload,
+  type QuestionPlanErrorPayload,
+  type QuestionPlanProgressPayload,
+  QUESTION_PLAN_STAGE_DETAILS,
+  QUESTION_PLAN_STAGE_SEQUENCE
+} from '@/lib/question-plan'
+import { fetchWithTimeout, HttpStatusError, isRetriableError, withRetries } from '@/lib/retry'
 import { fetchLatestTenK, resolveSecCompany } from '@/lib/sec'
 
 export const runtime = 'nodejs'
@@ -62,6 +69,8 @@ const MAX_TOTAL_DOCUMENT_BYTES = 20 * 1024 * 1024
 const MAX_TEXT_DOCUMENT_CHARS = 40000
 const MAX_TEN_K_CONTEXT_CHARS = 60000
 const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash'
+const GEMINI_REQUEST_TIMEOUT_MS = 45000
+const GEMINI_REQUEST_ATTEMPTS = 3
 
 function getGeminiApiKey() {
   return process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY
@@ -359,7 +368,8 @@ async function generateQuestionPlan({
   filingDate,
   filingUrl,
   tenKContext,
-  documentParts
+  documentParts,
+  onProgress
 }: {
   companyName: string
   companyTicker: string
@@ -367,6 +377,7 @@ async function generateQuestionPlan({
   filingUrl: string
   tenKContext: string
   documentParts: GeminiPart[]
+  onProgress?: (description: string) => void
 }) {
   const apiKey = getGeminiApiKey()
 
@@ -399,106 +410,235 @@ async function generateQuestionPlan({
     tenKContext
   ].join('\n')
 
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        generationConfig: {
-          temperature: 0.2,
-          responseMimeType: 'application/json'
+  return withRetries(
+    async () => {
+      onProgress?.('Submitting the document package to Gemini.')
+      const requestStartedAt = Date.now()
+      const heartbeat = setInterval(() => {
+        const elapsedSeconds = Math.max(1, Math.round((Date.now() - requestStartedAt) / 1000))
+        onProgress?.(`Waiting on Gemini to return structured questions. ${elapsedSeconds}s elapsed.`)
+      }, 4000)
+
+      try {
+      const response = await fetchWithTimeout(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            generationConfig: {
+              temperature: 0.2,
+              responseMimeType: 'application/json'
+            },
+            contents: [
+              {
+                role: 'user',
+                parts: [{ text: prompt }, ...documentParts]
+              }
+            ]
+          })
         },
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: prompt }, ...documentParts]
-          }
-        ]
-      })
+        GEMINI_REQUEST_TIMEOUT_MS
+      )
+
+      if (!response.ok) {
+        const detail = await readErrorDetail(response)
+        throw new HttpStatusError(response.status, `Gemini request failed: ${detail}`)
+      }
+
+      onProgress?.('Gemini responded. Parsing the structured question plan.')
+      const payload = await response.json()
+      const content = extractGeminiText(payload)
+
+      if (!content) {
+        throw new Error('Gemini returned an empty response')
+      }
+
+      const parsed = JSON.parse(extractJsonObject(content)) as GeminiPlanPayload
+      onProgress?.('Question plan parsed successfully. Preparing the final response.')
+      return normalizePlan(parsed)
+      } finally {
+        clearInterval(heartbeat)
+      }
+    },
+    {
+      attempts: GEMINI_REQUEST_ATTEMPTS,
+      shouldRetry: (error) =>
+        isRetriableError(error) ||
+        (error instanceof Error &&
+          ['Gemini returned an empty response', 'Gemini did not return a JSON object'].includes(error.message))
     }
   )
+}
 
-  if (!response.ok) {
-    const detail = await readErrorDetail(response)
-    throw new Error(`Gemini request failed: ${detail}`)
-  }
+function createQuestionPlanStream(request: Request) {
+  const encoder = new TextEncoder()
 
-  const payload = await response.json()
-  const content = extractGeminiText(payload)
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        const emit = <T>(event: string, payload: T) => {
+          controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`))
+        }
 
-  if (!content) {
-    throw new Error('Gemini returned an empty response')
-  }
+        const emitProgress = (payload: QuestionPlanProgressPayload) => {
+          emit('progress', payload)
+        }
 
-  const parsed = JSON.parse(extractJsonObject(content)) as GeminiPlanPayload
-  return normalizePlan(parsed)
+        const emitError = (message: string) => {
+          const payload: QuestionPlanErrorPayload = { message }
+          emit('error', payload)
+        }
+
+        const emitComplete = (result: AnalysisResult) => {
+          const payload: QuestionPlanCompletePayload = { result }
+          emit('complete', payload)
+        }
+
+        const run = async () => {
+          try {
+            controller.enqueue(encoder.encode(': connected\n\n'))
+
+            emitProgress({
+              stageId: QUESTION_PLAN_STAGE_SEQUENCE[0],
+              ...QUESTION_PLAN_STAGE_DETAILS['preparing-analysis']
+            })
+
+            const formData = await request.formData()
+            const companyNameValue = formData.get('companyName')
+            const companyTickerValue = formData.get('companyTicker')
+            const rawDocuments = formData.getAll('documents')
+
+            if (typeof companyNameValue !== 'string' || !companyNameValue.trim()) {
+              throw new Error('companyName is required')
+            }
+
+            const documents = rawDocuments.filter((entry): entry is File => entry instanceof File)
+
+            if (documents.length === 0) {
+              throw new Error('At least one uploaded document is required')
+            }
+
+            if (documents.length > MAX_DOCUMENTS) {
+              throw new Error(`Upload no more than ${MAX_DOCUMENTS} documents at a time`)
+            }
+
+            const totalBytes = documents.reduce((sum, file) => sum + file.size, 0)
+
+            if (totalBytes > MAX_TOTAL_DOCUMENT_BYTES) {
+              throw new Error('The combined upload size exceeds the 20 MB limit')
+            }
+
+            emitProgress({
+              stageId: QUESTION_PLAN_STAGE_SEQUENCE[1],
+              title: QUESTION_PLAN_STAGE_DETAILS['resolving-company'].title,
+              description: `Resolving "${companyNameValue.trim()}" against the SEC company records.`
+            })
+
+            const company = await resolveSecCompany(
+              companyNameValue,
+              typeof companyTickerValue === 'string' ? companyTickerValue : undefined
+            )
+
+            emitProgress({
+              stageId: QUESTION_PLAN_STAGE_SEQUENCE[2],
+              title: QUESTION_PLAN_STAGE_DETAILS['loading-10k'].title,
+              description: `Fetching the latest 10-K for ${company.title} (${company.ticker}).`
+            })
+
+            const latestTenK = await fetchLatestTenK(company)
+
+            emitProgress({
+              stageId: QUESTION_PLAN_STAGE_SEQUENCE[3],
+              title: QUESTION_PLAN_STAGE_DETAILS['extracting-business-units'].title,
+              description: `Extracting business-unit context from the ${latestTenK.filingDate} annual filing.`
+            })
+
+            const tenKContext = extractTenKContext(latestTenK.content)
+
+            emitProgress({
+              stageId: QUESTION_PLAN_STAGE_SEQUENCE[4],
+              title: QUESTION_PLAN_STAGE_DETAILS['preparing-documents'].title,
+              description: `Preparing ${documents.length} uploaded ${documents.length === 1 ? 'document' : 'documents'} for Gemini.`
+            })
+
+            const documentParts: GeminiPart[] = []
+
+            for (const [index, file] of documents.entries()) {
+              const parts = await fileToGeminiParts(file)
+              documentParts.push(...parts)
+
+              emitProgress({
+                stageId: QUESTION_PLAN_STAGE_SEQUENCE[4],
+                title: QUESTION_PLAN_STAGE_DETAILS['preparing-documents'].title,
+                description: `Prepared ${index + 1} of ${documents.length}: ${file.name}`
+              })
+            }
+
+            emitProgress({
+              stageId: QUESTION_PLAN_STAGE_SEQUENCE[5],
+              title: QUESTION_PLAN_STAGE_DETAILS['generating-questions'].title,
+              description: `Sending the filing context and uploaded materials to Gemini for ${company.title}.`
+            })
+
+            const plan = await generateQuestionPlan({
+              companyName: company.title,
+              companyTicker: company.ticker,
+              filingDate: latestTenK.filingDate,
+              filingUrl: latestTenK.url,
+              tenKContext,
+              documentParts,
+              onProgress: (description) => {
+                emitProgress({
+                  stageId: QUESTION_PLAN_STAGE_SEQUENCE[5],
+                  title: QUESTION_PLAN_STAGE_DETAILS['generating-questions'].title,
+                  description
+                })
+              }
+            })
+
+            emitProgress({
+              stageId: QUESTION_PLAN_STAGE_SEQUENCE[6],
+              title: QUESTION_PLAN_STAGE_DETAILS['finalizing-response'].title,
+              description: `Finalizing ${plan.questions.length} tailored review questions.`
+            })
+
+            emitComplete({
+              company: {
+                name: company.title,
+                ticker: company.ticker
+              },
+              latestTenK: {
+                filingDate: latestTenK.filingDate,
+                accessionNumber: latestTenK.accessionNumber,
+                url: latestTenK.url
+              },
+              businessUnits: plan.businessUnits,
+              questions: plan.questions
+            })
+          } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to generate question plan'
+            emitError(message)
+          } finally {
+            controller.close()
+          }
+        }
+
+        void run()
+      }
+    }),
+    {
+      headers: {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive'
+      }
+    }
+  )
 }
 
 export async function POST(request: Request) {
-  try {
-    const formData = await request.formData()
-    const companyNameValue = formData.get('companyName')
-    const companyTickerValue = formData.get('companyTicker')
-    const rawDocuments = formData.getAll('documents')
-
-    if (typeof companyNameValue !== 'string' || !companyNameValue.trim()) {
-      return NextResponse.json({ error: 'companyName is required' }, { status: 400 })
-    }
-
-    const documents = rawDocuments.filter((entry): entry is File => entry instanceof File)
-
-    if (documents.length === 0) {
-      return NextResponse.json({ error: 'At least one uploaded document is required' }, { status: 400 })
-    }
-
-    if (documents.length > MAX_DOCUMENTS) {
-      return NextResponse.json({ error: `Upload no more than ${MAX_DOCUMENTS} documents at a time` }, { status: 400 })
-    }
-
-    const totalBytes = documents.reduce((sum, file) => sum + file.size, 0)
-
-    if (totalBytes > MAX_TOTAL_DOCUMENT_BYTES) {
-      return NextResponse.json(
-        { error: 'The combined upload size exceeds the 20 MB limit' },
-        { status: 400 }
-      )
-    }
-
-    const company = await resolveSecCompany(
-      companyNameValue,
-      typeof companyTickerValue === 'string' ? companyTickerValue : undefined
-    )
-    const latestTenK = await fetchLatestTenK(company)
-    const tenKContext = extractTenKContext(latestTenK.content)
-    const documentParts = (await Promise.all(documents.map((file) => fileToGeminiParts(file)))).flat()
-    const plan = await generateQuestionPlan({
-      companyName: company.title,
-      companyTicker: company.ticker,
-      filingDate: latestTenK.filingDate,
-      filingUrl: latestTenK.url,
-      tenKContext,
-      documentParts
-    })
-
-    return NextResponse.json({
-      company: {
-        name: company.title,
-        ticker: company.ticker
-      },
-      latestTenK: {
-        filingDate: latestTenK.filingDate,
-        accessionNumber: latestTenK.accessionNumber,
-        url: latestTenK.url
-      },
-      businessUnits: plan.businessUnits,
-      questions: plan.questions
-    })
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Failed to generate question plan'
-
-    return NextResponse.json({ error: message }, { status: 500 })
-  }
+  return createQuestionPlanStream(request)
 }

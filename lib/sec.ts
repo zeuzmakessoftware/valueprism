@@ -1,6 +1,10 @@
+import { fetchWithTimeout, HttpStatusError, withRetries } from '@/lib/retry'
+
 const SEC_COMPANY_TICKERS_URL = 'https://www.sec.gov/files/company_tickers.json'
 const SEC_SUBMISSIONS_BASE_URL = 'https://data.sec.gov/submissions'
 const SEC_ARCHIVES_BASE_URL = 'https://www.sec.gov/Archives/edgar/data'
+const SEC_FETCH_TIMEOUT_MS = 20000
+const SEC_FETCH_ATTEMPTS = 3
 
 type SecCompanyTickerRecord = {
   cik_str: number
@@ -45,27 +49,49 @@ function getSecHeaders() {
 }
 
 async function fetchSecJson<T>(url: string): Promise<T> {
-  const response = await fetch(url, {
-    headers: getSecHeaders()
-  })
+  return withRetries(
+    async () => {
+      const response = await fetchWithTimeout(
+        url,
+        {
+          headers: getSecHeaders()
+        },
+        SEC_FETCH_TIMEOUT_MS
+      )
 
-  if (!response.ok) {
-    throw new Error(`SEC request failed with status ${response.status}`)
-  }
+      if (!response.ok) {
+        throw new HttpStatusError(response.status, `SEC request failed with status ${response.status}`)
+      }
 
-  return response.json() as Promise<T>
+      return response.json() as Promise<T>
+    },
+    {
+      attempts: SEC_FETCH_ATTEMPTS
+    }
+  )
 }
 
 async function fetchSecText(url: string): Promise<string> {
-  const response = await fetch(url, {
-    headers: getSecHeaders()
-  })
+  return withRetries(
+    async () => {
+      const response = await fetchWithTimeout(
+        url,
+        {
+          headers: getSecHeaders()
+        },
+        SEC_FETCH_TIMEOUT_MS
+      )
 
-  if (!response.ok) {
-    throw new Error(`SEC request failed with status ${response.status}`)
-  }
+      if (!response.ok) {
+        throw new HttpStatusError(response.status, `SEC request failed with status ${response.status}`)
+      }
 
-  return response.text()
+      return response.text()
+    },
+    {
+      attempts: SEC_FETCH_ATTEMPTS
+    }
+  )
 }
 
 export async function fetchCompanyTickerMap(): Promise<SecCompanyTickerMap> {

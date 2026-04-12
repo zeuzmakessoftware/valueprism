@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 })
 
 export const metadata: Metadata = {
-  title: 'Abide',
+  title: 'Valueprism',
   description:
     "A bilateral pricing algorithm that takes documents from the client and law firm to produce a recommended price range anchored in the matter's value to the client's business."
 }

@@ -42,7 +42,11 @@ type ParsedSseMessage = {
   data: unknown
 }
 
-type Step = 1 | 2 | 3 | 4 | 5 | 6
+type ValuePricingResponsePayload = {
+  result: PricingSummary
+}
+
+type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7
 
 type MatterProfileOption = {
   label: string
@@ -88,6 +92,13 @@ type UnitSummary = {
   sharePercent: number
 }
 
+type PricingCurvePoint = {
+  label: string
+  floor: number
+  recommended: number
+  ceiling: number
+}
+
 type PricingSummary = {
   totalQuestions: number
   answeredQuestions: number
@@ -119,12 +130,18 @@ type PricingSummary = {
     words: number
   }>
   filingDateLabel: string
+  executiveSummary: string
+  pricingNarrative: string
+  assumptions: string[]
+  graphMoments: PricingCurvePoint[]
 }
 
 const ANALYSIS_TOAST_ID = 'question-plan-analysis'
 const ANALYSIS_REQUEST_TIMEOUT_MS = 90000
+const VALUE_PRICING_REQUEST_TIMEOUT_MS = 90000
+const VALUE_PRICING_TOAST_ID = 'value-pricing-analysis'
 const INITIAL_STAGE_ID: QuestionPlanStageId = QUESTION_PLAN_STAGE_SEQUENCE[0]
-const STEP_SEQUENCE: Step[] = [1, 2, 3, 4, 5, 6]
+const STEP_SEQUENCE: Step[] = [1, 2, 3, 4, 5, 6, 7]
 const BUSINESS_IMPACT_OPTIONS: MatterProfileOption[] = [
   { label: 'Business as usual', score: 1 },
   { label: 'Reductive', score: 2 },
@@ -469,6 +486,61 @@ function buildMatterProfileContext(matterProfile: MatterProfile) {
   ].join('\n')
 }
 
+function buildDefaultPricingGraphMoments(summary: Pick<
+  PricingSummary,
+  'priceFloor' | 'priceCeiling' | 'recommendedPrice' | 'dimensions'
+>) {
+  const spread = Math.max(summary.priceCeiling - summary.priceFloor, 1)
+  const getDimensionScore = (key: ValueDimensionKey) =>
+    summary.dimensions.find((dimension) => dimension.key === key)?.score ?? 50
+
+  const graphTemplate = [
+    {
+      label: 'Baseline',
+      normalized: 0.16
+    },
+    {
+      label: 'Risk',
+      normalized: 0.18 + getDimensionScore('riskReduction') / 100 * 0.52
+    },
+    {
+      label: 'Commercial',
+      normalized: 0.12 + getDimensionScore('transactionEnablement') / 100 * 0.66
+    },
+    {
+      label: 'Timing',
+      normalized: 0.14 + getDimensionScore('speedAndCertainty') / 100 * 0.58
+    },
+    {
+      label: 'Strategic',
+      normalized: 0.2 + getDimensionScore('optionality') / 100 * 0.52
+    }
+  ]
+
+  const moments = graphTemplate.map((entry, index) => {
+    const recommended = roundCurrency(summary.priceFloor + spread * clamp(entry.normalized, 0.08, 0.96))
+    const volatility = 0.12 + Math.abs(entry.normalized - 0.5) * 0.35 + (index % 2 === 0 ? 0.03 : 0.07)
+    const localSpread = Math.max(spread * volatility, 5000)
+
+    return {
+      label: entry.label,
+      floor: roundCurrency(clamp(recommended - localSpread / 2, summary.priceFloor * 0.7, summary.priceCeiling)),
+      recommended,
+      ceiling: roundCurrency(clamp(recommended + localSpread / 2, summary.priceFloor, summary.priceCeiling * 1.15))
+    }
+  })
+
+  return [
+    ...moments,
+    {
+      label: 'Recommended',
+      floor: summary.priceFloor,
+      recommended: summary.recommendedPrice,
+      ceiling: summary.priceCeiling
+    }
+  ]
+}
+
 function buildPricingSummary(analysis: AnalysisResult, answers: string[], matterProfile: MatterProfile): PricingSummary {
   const snapshots = analysis.questions.map((question, index) => {
     const answer = answers[index]?.trim() ?? ''
@@ -653,7 +725,7 @@ function buildPricingSummary(analysis: AnalysisResult, answers: string[], matter
     marketSignalLabel = 'Mid-scale business matter'
   }
 
-  return {
+  const baseSummary: PricingSummary = {
     totalQuestions,
     answeredQuestions,
     totalWords,
@@ -678,7 +750,20 @@ function buildPricingSummary(analysis: AnalysisResult, answers: string[], matter
     dimensions,
     units,
     highlights,
-    filingDateLabel: formatFilingDate(analysis.latestTenK.filingDate)
+    filingDateLabel: formatFilingDate(analysis.latestTenK.filingDate),
+    executiveSummary: `${marketSignalLabel} with ${biggestDriver.toLowerCase()} acting as the strongest pricing lever in the completed review answers.`,
+    pricingNarrative: 'The fee curve rises and dips across the value drivers before settling on the recommended band.',
+    assumptions: [
+      'The written answers accurately represent the uploaded document set.',
+      'The stated prepared exposure is a valid downside anchor for the matter.',
+      'Internal delivery economics and staffing constraints have not yet been layered into the recommendation.'
+    ],
+    graphMoments: []
+  }
+
+  return {
+    ...baseSummary,
+    graphMoments: buildDefaultPricingGraphMoments(baseSummary)
   }
 }
 
@@ -697,6 +782,9 @@ export default function Home() {
   const [analysisError, setAnalysisError] = useState('')
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [analysisAttempt, setAnalysisAttempt] = useState(0)
+  const [pricingSummary, setPricingSummary] = useState<PricingSummary | null>(null)
+  const [pricingError, setPricingError] = useState('')
+  const [isGeneratingPricing, setIsGeneratingPricing] = useState(false)
   const [matterProfile, setMatterProfile] = useState<MatterProfile>(DEFAULT_MATTER_PROFILE)
   const [analysisProgress, setAnalysisProgress] = useState<QuestionPlanProgressPayload>({
     stageId: INITIAL_STAGE_ID,
@@ -718,7 +806,13 @@ export default function Home() {
     100
   )
   const matterProfileSignalLabel = getMatterProfileSignalLabel(matterProfileScore)
-  const pricingSummary = analysis ? buildPricingSummary(analysis, answers, matterProfile) : null
+  const pricingScaffold = analysis ? buildPricingSummary(analysis, answers, matterProfile) : null
+
+  const resetPricing = () => {
+    setPricingSummary(null)
+    setPricingError('')
+    setIsGeneratingPricing(false)
+  }
 
   const resetAnalysis = ({ resetMatterProfile = false }: { resetMatterProfile?: boolean } = {}) => {
     setAnalysis(null)
@@ -726,6 +820,7 @@ export default function Home() {
     setCurrentQuestionIndex(0)
     setAnswers([])
     setAnalysisAttempt(0)
+    resetPricing()
     if (resetMatterProfile) {
       setMatterProfile(DEFAULT_MATTER_PROFILE)
     }
@@ -743,6 +838,24 @@ export default function Home() {
       formData.append('companyTicker', selectedCompany.ticker)
     }
 
+    formData.append('matterProfileContext', buildMatterProfileContext(matterProfile))
+
+    uploadedFiles.forEach((file) => {
+      formData.append('documents', file)
+    })
+
+    return formData
+  }
+
+  const buildPricingFormData = () => {
+    if (!analysis) {
+      return null
+    }
+
+    const formData = new FormData()
+    formData.append('analysis', JSON.stringify(analysis))
+    formData.append('answers', JSON.stringify(answers))
+    formData.append('matterProfile', JSON.stringify(matterProfile))
     formData.append('matterProfileContext', buildMatterProfileContext(matterProfile))
 
     uploadedFiles.forEach((file) => {
@@ -843,6 +956,52 @@ export default function Home() {
     }
   }
 
+  const requestValuePricing = async () => {
+    const formData = buildPricingFormData()
+
+    if (!formData) {
+      throw createRequestError('The pricing request could not be prepared because the analysis is missing.')
+    }
+
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => controller.abort(), VALUE_PRICING_REQUEST_TIMEOUT_MS)
+
+    try {
+      const response = await fetch('/api/value-pricing', {
+        method: 'POST',
+        body: formData,
+        signal: controller.signal
+      })
+
+      if (!response.ok) {
+        let message = 'Failed to generate value pricing output'
+
+        try {
+          const payload = (await response.json()) as { error?: string }
+          message = payload.error ?? message
+        } catch {
+          try {
+            message = await response.text()
+          } catch {
+            message = 'Failed to generate value pricing output'
+          }
+        }
+
+        throw createRequestError(message, response.status)
+      }
+
+      const payload = (await response.json()) as ValuePricingResponsePayload
+
+      if (!payload?.result) {
+        throw createRequestError('The pricing request did not return a usable result.')
+      }
+
+      return payload.result
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (event.target.files) {
       const newFiles = Array.from(event.target.files)
@@ -913,6 +1072,7 @@ export default function Home() {
   useEffect(() => {
     return () => {
       toast.dismiss(ANALYSIS_TOAST_ID)
+      toast.dismiss(VALUE_PRICING_TOAST_ID)
     }
   }, [])
 
@@ -975,7 +1135,43 @@ export default function Home() {
     }
   }
 
+  const handleGenerateValuePricing = async () => {
+    if (!analysis || isGeneratingPricing) {
+      return
+    }
+
+    resetPricing()
+    setIsGeneratingPricing(true)
+    setStep(6)
+
+    toast.loading('Generating value pricing output', {
+      id: VALUE_PRICING_TOAST_ID,
+      description: 'Gemini is synthesizing the matter inputs, uploaded documents, and completed answers.',
+      duration: Infinity
+    })
+
+    try {
+      const result = await requestValuePricing()
+      setPricingSummary(result)
+      setStep(7)
+      toast.success('Value pricing output ready', {
+        id: VALUE_PRICING_TOAST_ID,
+        description: `Generated a Gemini-backed pricing recommendation for ${analysis.company.name}.`
+      })
+    } catch (error) {
+      const message = getErrorMessage(error)
+      setPricingError(message)
+      toast.error('Value pricing failed', {
+        id: VALUE_PRICING_TOAST_ID,
+        description: message
+      })
+    } finally {
+      setIsGeneratingPricing(false)
+    }
+  }
+
   const updateCurrentAnswer = (value: string) => {
+    resetPricing()
     setAnswers((prev) => {
       const next = [...prev]
       next[currentQuestionIndex] = value
@@ -993,7 +1189,7 @@ export default function Home() {
       return
     }
 
-    setStep(6)
+    void handleGenerateValuePricing()
   }
 
   const handlePreviousQuestion = () => {
@@ -1006,8 +1202,10 @@ export default function Home() {
   }
 
   const containerWidth =
-    step === 6
+    step === 7
       ? 'max-w-[960px]'
+      : step === 6
+        ? 'max-w-[780px]'
       : step === 5
         ? 'max-w-[620px]'
         : step === 3
@@ -1017,6 +1215,7 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-[#f4f4f5] flex items-center justify-center p-6 font-sans">
       <div className={`w-full ${containerWidth}`}>
+        {/* <h2 className='text-center text-6xl mb-8 tracking-tighter font-light text-[#10b981]'>Valueprism</h2> */}
         <div className="flex justify-center mb-10">
           <div className="flex items-center gap-2">
             {STEP_SEQUENCE.map((item) => (
@@ -1536,7 +1735,7 @@ export default function Home() {
                   <div className="flex items-center justify-between gap-4">
                     <div className="space-y-1">
                       <p className="text-[12px] text-zinc-500 leading-relaxed">
-                        Question plan generated from {analysis.company.name}&apos;s {pricingSummary?.filingDateLabel} 10-K.{' '}
+                        Question plan generated from {analysis.company.name}&apos;s {pricingScaffold?.filingDateLabel} 10-K.{' '}
                         <a
                           href={analysis.latestTenK.url}
                           target="_blank"
@@ -1610,15 +1809,113 @@ export default function Home() {
                     onClick={handleNextQuestion}
                     className="h-11 px-6 rounded-xl bg-zinc-900 text-white text-[14px] font-medium disabled:opacity-50 disabled:cursor-not-allowed hover:bg-zinc-800 transition-colors"
                   >
-                    {currentQuestionIndex === questions.length - 1 ? 'View Pricing Result' : 'Next Question'}
+                    {currentQuestionIndex === questions.length - 1 ? 'Generate Gemini Pricing Output' : 'Next Question'}
                   </button>
                 </div>
               </motion.div>
             )}
 
-            {step === 6 && analysis && pricingSummary && (
+            {step === 6 && analysis && (
               <motion.div
                 key="step6"
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -12 }}
+                className="space-y-4"
+              >
+                {isGeneratingPricing ? (
+                  <div className="bg-white border border-zinc-200 rounded-2xl overflow-hidden shadow-sm">
+                    <div className="p-6 border-b border-zinc-200 flex items-start justify-between gap-4">
+                      <div className="space-y-2">
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-700">
+                          Post-Question Gemini Pass
+                        </p>
+                        <h2 className="text-[22px] font-semibold text-zinc-900 leading-tight">
+                          Building the value pricing output
+                        </h2>
+                        <p className="text-[14px] text-zinc-600 leading-relaxed max-w-[560px]">
+                          Gemini is processing the completed answers, the uploaded materials, and the matter inputs into a structured pricing recommendation and a value-driven chart path.
+                        </p>
+                      </div>
+                      <div className="mt-1 flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700">
+                        <div className="w-5 h-5 border-2 border-emerald-200 border-t-emerald-600 rounded-full animate-spin" />
+                      </div>
+                    </div>
+
+                    <div className="grid gap-4 border-b border-zinc-200 p-5 md:grid-cols-3">
+                      <MetricCard
+                        label="Completed Answers"
+                        value={`${completedQuestionCount}/${questions.length}`}
+                        detail="Structured reviewer responses ready"
+                      />
+                      <MetricCard
+                        label="Uploaded Documents"
+                        value={`${uploadedFiles.length}`}
+                        detail="Sent back through the Gemini pricing pass"
+                      />
+                      <MetricCard
+                        label="Baseline Signal"
+                        value={pricingScaffold?.marketSignalLabel ?? 'Preparing'}
+                        detail={pricingScaffold ? formatCurrency(pricingScaffold.recommendedPrice) : 'Pricing scaffold is forming'}
+                      />
+                    </div>
+
+                    <div className="p-5 space-y-3">
+                      {[
+                        'Questionnaire complete and packaged for pricing.',
+                        'Matter inputs and uploaded documents attached as Gemini context.',
+                        'Gemini is producing the final value pricing output and chart moments.'
+                      ].map((item, index) => (
+                        <div key={item} className="flex items-start gap-3 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
+                          <div
+                            className={`mt-0.5 flex h-6 w-6 items-center justify-center rounded-full border text-[11px] font-semibold ${
+                              index < 2 ? 'border-emerald-200 bg-white text-emerald-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                            }`}
+                          >
+                            {index < 2 ? '✓' : '…'}
+                          </div>
+                          <p className="text-[13px] text-zinc-700">{item}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center py-6 text-center space-y-6">
+                    <div className="w-14 h-14 rounded-full bg-red-50 border border-red-100 flex items-center justify-center text-red-500">
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M12 9v4" />
+                        <path d="M12 17h.01" />
+                        <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+                      </svg>
+                    </div>
+                    <div className="space-y-2">
+                      <h2 className="text-[18px] font-medium text-zinc-900">Value pricing could not be completed</h2>
+                      <p className="text-[14px] text-zinc-600 max-w-[420px] leading-relaxed">
+                        {pricingError || 'The Gemini pricing pass did not return a usable result.'}
+                      </p>
+                    </div>
+                    <div className="flex gap-3">
+                      <button
+                        onClick={() => setStep(5)}
+                        className="h-11 px-5 rounded-xl border border-zinc-300 bg-white text-zinc-900 text-[14px] font-medium"
+                      >
+                        Back to Questions
+                      </button>
+                      <button
+                        onClick={() => void handleGenerateValuePricing()}
+                        className="h-11 px-5 rounded-xl bg-zinc-900 text-white text-[14px] font-medium"
+                      >
+                        Try Again
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </motion.div>
+            )}
+
+            {step === 7 && analysis && pricingSummary && (
+              <motion.div
+                key="step7"
                 initial={{ opacity: 0, y: 12 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -12 }}
@@ -1631,7 +1928,7 @@ export default function Home() {
                         {analysis.company.name} Value Pricing Output
                       </h2>
                       <p className="text-[13px] text-zinc-500 mt-1">
-                        Client-side preview based on the uploaded materials, the slider inputs, and the completed questions. Firm-side inputs would refine the point within the band.
+                        Gemini synthesized this output from the uploaded materials, the intake sliders, and the completed question set.
                       </p>
                     </div>
                     <button
@@ -1658,6 +1955,14 @@ export default function Home() {
                         <p className="mt-3 text-[12px] text-zinc-500">
                           {pricingSummary.marketSignalLabel} · fee curve point {formatPercent(pricingSummary.recommendedFeePercent)}
                         </p>
+                        <div className="mt-5 rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-4 text-left">
+                          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-700">
+                            Gemini Summary
+                          </p>
+                          <p className="mt-2 text-[13px] leading-relaxed text-emerald-950">
+                            {pricingSummary.executiveSummary}
+                          </p>
+                        </div>
                         <div className="mt-5 grid gap-3 sm:grid-cols-3">
                           <MetricCard
                             label="Floor"
@@ -1681,6 +1986,8 @@ export default function Home() {
                         floor={pricingSummary.priceFloor}
                         recommended={pricingSummary.recommendedPrice}
                         ceiling={pricingSummary.priceCeiling}
+                        graphMoments={pricingSummary.graphMoments}
+                        narrative={pricingSummary.pricingNarrative}
                       />
                     </div>
                   </div>
@@ -1699,7 +2006,7 @@ export default function Home() {
                     <MetricCard
                       label="Fee Band"
                       value={`${formatPercent(pricingSummary.feeBandLowPercent)}–${formatPercent(pricingSummary.feeBandHighPercent)}`}
-                      detail="Mapped from the indicative deck curve"
+                      detail="Adjusted by the Gemini pricing pass"
                     />
                     <MetricCard
                       label="Matter Complexity"
@@ -1711,7 +2018,7 @@ export default function Home() {
                   <div className="p-5 border-b border-zinc-200">
                     <SectionTitle
                       title="Value Breakdown"
-                      subtitle="Four value dimensions from the pitch deck translated into this pricing preview."
+                      subtitle="Gemini-adjusted value dimensions translated into the pricing recommendation."
                     />
                     <div className="space-y-4">
                       {pricingSummary.dimensions.map((dimension) => (
@@ -1818,7 +2125,7 @@ export default function Home() {
                   <div className="p-5">
                     <SectionTitle
                       title="Pricing Summary"
-                      subtitle="A simple hackathon-friendly translation of the deck logic."
+                      subtitle="Gemini narrative plus the anchor metrics behind the final recommendation."
                     />
                     <div className="space-y-3">
                       <SummaryRow label="Latest 10-K" value={`${pricingSummary.filingDateLabel} filing`} />
@@ -1826,6 +2133,18 @@ export default function Home() {
                       <SummaryRow label="Matter signal" value={`${pricingSummary.matterProfileScore}/100`} />
                       <SummaryRow label="Average response depth" value={`${pricingSummary.averageWords} words per answer`} />
                       <SummaryRow label="Recommended point" value={formatCurrency(pricingSummary.recommendedPrice)} />
+                    </div>
+                    <div className="mt-5 rounded-xl border border-zinc-200 bg-zinc-50 p-4">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-400">
+                        Key Assumptions
+                      </p>
+                      <div className="mt-3 space-y-2">
+                        {pricingSummary.assumptions.map((assumption) => (
+                          <p key={assumption} className="text-[12px] leading-relaxed text-zinc-600">
+                            {assumption}
+                          </p>
+                        ))}
+                      </div>
                     </div>
                     <div className="mt-5 flex flex-wrap gap-3">
                       <a
@@ -2033,44 +2352,34 @@ function MetricCard({
 function PricingBandGraph({
   floor,
   recommended,
-  ceiling
+  ceiling,
+  graphMoments,
+  narrative
 }: {
   floor: number
   recommended: number
   ceiling: number
+  graphMoments: PricingCurvePoint[]
+  narrative?: string
 }) {
   const gradientId = useId()
-  const spread = Math.max(ceiling - floor, 1)
-  const recommendedRatio = clamp((recommended - floor) / spread, 0, 1)
-  const curveStops = [0, 0.2, 0.45, 0.72, 1]
-  const chartData = curveStops.map((stop, index) => {
-    const ease = Math.pow(stop, 1.35)
-    const lift = 1 - ease
-    const floorValue = floor + spread * 0.95 * lift
-    const ceilingValue = ceiling + spread * 1.65 * lift
-    const recommendedValue = floorValue + (ceilingValue - floorValue) * recommendedRatio
-
-    return {
-      step: index,
-      label: index === 0 ? 'Higher fee zone' : index === curveStops.length - 1 ? 'Current matter' : '',
-      floor: floorValue,
-      ceiling: ceilingValue,
-      recommended: recommendedValue,
-      bandBase: floorValue,
-      bandSize: ceilingValue - floorValue
-    }
-  })
+  const chartData = graphMoments.map((moment, index) => ({
+    ...moment,
+    step: index,
+    bandBase: moment.floor,
+    bandSize: Math.max(moment.ceiling - moment.floor, 1)
+  }))
   const chartMax = chartData.reduce((max, point) => Math.max(max, point.ceiling), ceiling)
   const chartMin = chartData.reduce((min, point) => Math.min(min, point.floor), floor)
-  const currentStep = chartData[chartData.length - 1]?.step ?? 0
+  const currentPoint = chartData[chartData.length - 1]
 
   return (
     <div className="rounded-[28px] border border-zinc-200 bg-zinc-50/70 p-4 shadow-sm">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <p className="text-[13px] font-medium text-zinc-900">Fee Band Cross-Section</p>
+          <p className="text-[13px] font-medium text-zinc-900">Value Pricing Curve</p>
           <p className="text-[12px] text-zinc-500">
-            Floor-to-ceiling corridor with the recommended point running through the center of the band.
+            {narrative ?? 'Gemini returned a value-driven pricing path with a final recommended band.'}
           </p>
         </div>
         <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-400">
@@ -2091,20 +2400,15 @@ function PricingBandGraph({
 
               <CartesianGrid stroke="#f4f4f5" strokeDasharray="4 4" vertical={false} />
               <XAxis
-                dataKey="step"
-                type="number"
-                domain={[0, chartData.length - 1]}
-                ticks={[0, currentStep]}
-                tickFormatter={(value) => (value === 0 ? 'Higher fee zone' : 'Current matter')}
+                dataKey="label"
                 tickLine={false}
                 axisLine={false}
                 tick={{ fill: '#a1a1aa', fontSize: 11, fontWeight: 600 }}
                 tickMargin={10}
               />
               <YAxis
-                type="number"
-                domain={[chartMin * 0.92, chartMax * 1.02]}
-                ticks={[floor, ceiling]}
+                domain={[chartMin * 0.9, chartMax * 1.04]}
+                tickCount={5}
                 tickFormatter={formatCompactCurrency}
                 tickLine={false}
                 axisLine={false}
@@ -2145,21 +2449,23 @@ function PricingBandGraph({
                 dot={false}
                 activeDot={false}
               />
-              <ReferenceDot
-                x={currentStep}
-                y={recommended}
-                r={5.5}
-                fill="#18181b"
-                stroke="#ffffff"
-                strokeWidth={2}
-                label={{
-                  value: 'Current point',
-                  position: 'top',
-                  fill: '#3f3f46',
-                  fontSize: 11,
-                  fontWeight: 600
-                }}
-              />
+              {currentPoint && (
+                <ReferenceDot
+                  x={currentPoint.label}
+                  y={currentPoint.recommended}
+                  r={5.5}
+                  fill="#18181b"
+                  stroke="#ffffff"
+                  strokeWidth={2}
+                  label={{
+                    value: 'Recommended',
+                    position: 'top',
+                    fill: '#3f3f46',
+                    fontSize: 11,
+                    fontWeight: 600
+                  }}
+                />
+              )}
             </AreaChart>
           </ResponsiveContainer>
         </div>

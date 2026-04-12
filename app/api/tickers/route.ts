@@ -1,21 +1,12 @@
-import { NextResponse } from 'next/server';
+import { NextResponse } from 'next/server'
+
+import { fetchCompanyTickerMap } from '@/lib/sec'
 
 export async function GET() {
   try {
-    const response = await fetch('https://www.sec.gov/files/company_tickers.json', {
-      headers: {
-        // The SEC requires a descriptive User-Agent
-        'User-Agent': 'YourName yourname@example.com', 
-        'Accept-Encoding': 'gzip, deflate',
-        'Host': 'www.sec.gov'
-      }
-    });
-
-    if (!response.ok) throw new Error('SEC fetch failed');
-    
-    const data = await response.json();
-    return NextResponse.json(data);
-  } catch (error) {
-    return NextResponse.json({ error: 'Failed to fetch' }, { status: 500 });
+    const data = await fetchCompanyTickerMap()
+    return NextResponse.json(data)
+  } catch {
+    return NextResponse.json({ error: 'Failed to fetch' }, { status: 500 })
   }
 }

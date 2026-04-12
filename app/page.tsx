@@ -1,8 +1,18 @@
 "use client"
 
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useId, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { ArrowLeft, ArrowRight, FileText } from 'lucide-react'
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  Line,
+  ReferenceDot,
+  ResponsiveContainer,
+  XAxis,
+  YAxis
+} from 'recharts'
 import { toast } from 'sonner'
 
 import { Input } from '@/components/ui/input'
@@ -338,6 +348,15 @@ function formatCurrency(value: number) {
     style: 'currency',
     currency: 'USD',
     maximumFractionDigits: 0
+  }).format(value)
+}
+
+function formatCompactCurrency(value: number) {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    notation: 'compact',
+    maximumFractionDigits: value >= 10000000 ? 1 : 0
   }).format(value)
 }
 
@@ -1624,19 +1643,46 @@ export default function Home() {
                     </button>
                   </div>
 
-                  <div className="p-8 text-center border-b border-zinc-200">
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-400">
-                      Recommended Price
-                    </p>
-                    <div className="mt-3 text-[48px] font-semibold tracking-tight text-emerald-600">
-                      {formatCurrency(pricingSummary.recommendedPrice)}
+                  <div className="border-b border-zinc-200 p-6 md:p-8">
+                    <div className="grid gap-8 xl:grid-cols-[minmax(0,1fr)_420px] xl:items-center">
+                      <div className="text-center xl:text-left">
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-400">
+                          Recommended Price
+                        </p>
+                        <div className="mt-3 text-[48px] font-semibold tracking-tight text-emerald-600">
+                          {formatCurrency(pricingSummary.recommendedPrice)}
+                        </div>
+                        <p className="mt-2 text-[14px] text-zinc-600">
+                          Range {formatCurrency(pricingSummary.priceFloor)} to {formatCurrency(pricingSummary.priceCeiling)}
+                        </p>
+                        <p className="mt-3 text-[12px] text-zinc-500">
+                          {pricingSummary.marketSignalLabel} · fee curve point {formatPercent(pricingSummary.recommendedFeePercent)}
+                        </p>
+                        <div className="mt-5 grid gap-3 sm:grid-cols-3">
+                          <MetricCard
+                            label="Floor"
+                            value={formatCurrency(pricingSummary.priceFloor)}
+                            detail={formatPercent(pricingSummary.feeBandLowPercent)}
+                          />
+                          <MetricCard
+                            label="Point"
+                            value={formatCurrency(pricingSummary.recommendedPrice)}
+                            detail={formatPercent(pricingSummary.recommendedFeePercent)}
+                          />
+                          <MetricCard
+                            label="Ceiling"
+                            value={formatCurrency(pricingSummary.priceCeiling)}
+                            detail={formatPercent(pricingSummary.feeBandHighPercent)}
+                          />
+                        </div>
+                      </div>
+
+                      <PricingBandGraph
+                        floor={pricingSummary.priceFloor}
+                        recommended={pricingSummary.recommendedPrice}
+                        ceiling={pricingSummary.priceCeiling}
+                      />
                     </div>
-                    <p className="mt-2 text-[14px] text-zinc-600">
-                      Range {formatCurrency(pricingSummary.priceFloor)} to {formatCurrency(pricingSummary.priceCeiling)}
-                    </p>
-                    <p className="mt-3 text-[12px] text-zinc-500">
-                      {pricingSummary.marketSignalLabel} · fee curve point {formatPercent(pricingSummary.recommendedFeePercent)}
-                    </p>
                   </div>
 
                   <div className="grid gap-4 border-b border-zinc-200 p-5 md:grid-cols-2 xl:grid-cols-4">
@@ -1980,6 +2026,159 @@ function MetricCard({
       <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-400">{label}</p>
       <p className="mt-2 text-[20px] font-semibold text-zinc-900">{value}</p>
       <p className="mt-1 text-[12px] text-zinc-500">{detail}</p>
+    </div>
+  )
+}
+
+function PricingBandGraph({
+  floor,
+  recommended,
+  ceiling
+}: {
+  floor: number
+  recommended: number
+  ceiling: number
+}) {
+  const gradientId = useId()
+  const spread = Math.max(ceiling - floor, 1)
+  const recommendedRatio = clamp((recommended - floor) / spread, 0, 1)
+  const curveStops = [0, 0.2, 0.45, 0.72, 1]
+  const chartData = curveStops.map((stop, index) => {
+    const ease = Math.pow(stop, 1.35)
+    const lift = 1 - ease
+    const floorValue = floor + spread * 0.95 * lift
+    const ceilingValue = ceiling + spread * 1.65 * lift
+    const recommendedValue = floorValue + (ceilingValue - floorValue) * recommendedRatio
+
+    return {
+      step: index,
+      label: index === 0 ? 'Higher fee zone' : index === curveStops.length - 1 ? 'Current matter' : '',
+      floor: floorValue,
+      ceiling: ceilingValue,
+      recommended: recommendedValue,
+      bandBase: floorValue,
+      bandSize: ceilingValue - floorValue
+    }
+  })
+  const chartMax = chartData.reduce((max, point) => Math.max(max, point.ceiling), ceiling)
+  const chartMin = chartData.reduce((min, point) => Math.min(min, point.floor), floor)
+  const currentStep = chartData[chartData.length - 1]?.step ?? 0
+
+  return (
+    <div className="rounded-[28px] border border-zinc-200 bg-zinc-50/70 p-4 shadow-sm">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p className="text-[13px] font-medium text-zinc-900">Fee Band Cross-Section</p>
+          <p className="text-[12px] text-zinc-500">
+            Floor-to-ceiling corridor with the recommended point running through the center of the band.
+          </p>
+        </div>
+        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-400">
+          Spread {formatCurrency(Math.max(ceiling - floor, 0))}
+        </p>
+      </div>
+
+      <div className="mt-4 overflow-hidden rounded-2xl border border-zinc-200 bg-white p-3">
+        <div className="h-[240px] w-full">
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={chartData} margin={{ top: 16, right: 8, bottom: 4, left: 8 }}>
+              <defs>
+                <linearGradient id={`${gradientId}-band`} x1="0%" y1="0%" x2="0%" y2="100%">
+                  <stop offset="0%" stopColor="#34d399" stopOpacity="0.78" />
+                  <stop offset="100%" stopColor="#34d399" stopOpacity="0.16" />
+                </linearGradient>
+              </defs>
+
+              <CartesianGrid stroke="#f4f4f5" strokeDasharray="4 4" vertical={false} />
+              <XAxis
+                dataKey="step"
+                type="number"
+                domain={[0, chartData.length - 1]}
+                ticks={[0, currentStep]}
+                tickFormatter={(value) => (value === 0 ? 'Higher fee zone' : 'Current matter')}
+                tickLine={false}
+                axisLine={false}
+                tick={{ fill: '#a1a1aa', fontSize: 11, fontWeight: 600 }}
+                tickMargin={10}
+              />
+              <YAxis
+                type="number"
+                domain={[chartMin * 0.92, chartMax * 1.02]}
+                ticks={[floor, ceiling]}
+                tickFormatter={formatCompactCurrency}
+                tickLine={false}
+                axisLine={false}
+                tick={{ fill: '#a1a1aa', fontSize: 11, fontWeight: 600 }}
+                width={64}
+              />
+
+              <Area dataKey="bandBase" stackId="pricing-band" stroke="transparent" fill="transparent" />
+              <Area
+                type="monotone"
+                dataKey="bandSize"
+                stackId="pricing-band"
+                stroke="transparent"
+                fill={`url(#${gradientId}-band)`}
+              />
+              <Line
+                type="monotone"
+                dataKey="ceiling"
+                stroke="#10b981"
+                strokeWidth={2.75}
+                dot={false}
+                activeDot={false}
+              />
+              <Line
+                type="monotone"
+                dataKey="floor"
+                stroke="#10b981"
+                strokeWidth={2.75}
+                dot={false}
+                activeDot={false}
+              />
+              <Line
+                type="monotone"
+                dataKey="recommended"
+                stroke="#18181b"
+                strokeWidth={2}
+                strokeDasharray="8 8"
+                dot={false}
+                activeDot={false}
+              />
+              <ReferenceDot
+                x={currentStep}
+                y={recommended}
+                r={5.5}
+                fill="#18181b"
+                stroke="#ffffff"
+                strokeWidth={2}
+                label={{
+                  value: 'Current point',
+                  position: 'top',
+                  fill: '#3f3f46',
+                  fontSize: 11,
+                  fontWeight: 600
+                }}
+              />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-4 text-[11px] font-medium text-zinc-500">
+          <span className="inline-flex items-center gap-2">
+            <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
+            Ceiling {formatCurrency(ceiling)}
+          </span>
+          <span className="inline-flex items-center gap-2">
+            <span className="h-px w-4 border-t-2 border-dashed border-zinc-900" />
+            Point {formatCurrency(recommended)}
+          </span>
+          <span className="inline-flex items-center gap-2">
+            <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
+            Floor {formatCurrency(floor)}
+          </span>
+        </div>
+      </div>
     </div>
   )
 }

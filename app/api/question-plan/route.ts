@@ -46,10 +46,8 @@ function uniqueStrings(values: string[]) {
 
 function fallbackQuestionForUnit(unit: string, index: number): GeneratedQuestion {
   const prompts = [
-    `What evidence in the uploaded documents changes the outlook for ${unit} relative to how management frames it in the 10-K?`,
-    `Which customers, products, or geographies in the uploaded documents appear most material to ${unit}, and why?`,
-    `What operational, regulatory, or execution risks for ${unit} are surfaced in the uploaded documents?`,
-    `What do the uploaded documents imply about demand, pricing, margins, or investment priorities for ${unit}?`
+    `What does the document say about how ${unit} is doing, and does it look better or worse than expected?`,
+    `What are the biggest problems or risks mentioned in the document for ${unit}?`
   ]
 
   return {
@@ -96,7 +94,7 @@ function normalizePlan(payload: GeminiPlanPayload) {
   ]).slice(0, 6)
 
   if (businessUnits.length === 0) {
-    throw new Error('Gemini did not identify any business units')
+    throw new Error('Valueprism did not identify any business units')
   }
 
   const completedQuestions = questions
@@ -104,9 +102,9 @@ function normalizePlan(payload: GeminiPlanPayload) {
       businessUnit: entry.businessUnit || businessUnits[index % businessUnits.length],
       question: entry.question
     }))
-    .slice(0, 4)
+    .slice(0, 2)
 
-  while (completedQuestions.length < 4) {
+  while (completedQuestions.length < 2) {
     const unit = businessUnits[completedQuestions.length % businessUnits.length]
     completedQuestions.push(fallbackQuestionForUnit(unit, completedQuestions.length))
   }
@@ -155,9 +153,9 @@ async function generateQuestionPlan({
     'Instructions:',
     '1. Use the 10-K excerpt to identify 3 to 6 real business units, operating segments, or product lines. Prefer the company’s own language.',
     '2. Use the client matter calibration to emphasize the business units, risks, stakeholders, and urgency dimensions that appear most important.',
-    '3. Review the uploaded documents and produce exactly 4 questions for a reviewer to answer from those documents.',
-    '4. Each question must map to one business unit and should help a reviewer compare the uploaded documents against the priorities implied by the 10-K and client matter calibration.',
-    '5. Ask only questions that can plausibly be answered from the uploaded documents. Avoid yes/no phrasing and avoid generic summary prompts.',
+    '3. Review the uploaded documents and produce exactly 2 questions for a reviewer to answer from those documents.',
+    '4. Each question must map to one business unit. Keep the questions simple and direct — a high school student should be able to understand them.',
+    '5. Ask only questions that can be answered from the uploaded documents. Avoid yes/no questions and avoid vague or overly technical phrasing.',
     '6. Return JSON only with this shape:',
     '{',
     '  "businessUnits": ["unit"],',
@@ -172,11 +170,11 @@ async function generateQuestionPlan({
 
   return withRetries(
     async () => {
-      onProgress?.('Submitting the document package to Gemini.')
+      onProgress?.('Submitting the document package to Valueprism.')
       const requestStartedAt = Date.now()
       const heartbeat = setInterval(() => {
         const elapsedSeconds = Math.max(1, Math.round((Date.now() - requestStartedAt) / 1000))
-        onProgress?.(`Waiting on Gemini to return structured questions. ${elapsedSeconds}s elapsed.`)
+        onProgress?.(`Waiting on Valueprism to return structured questions. ${elapsedSeconds}s elapsed.`)
       }, 15000)
 
       try {
@@ -205,15 +203,15 @@ async function generateQuestionPlan({
 
       if (!response.ok) {
         const detail = await readErrorDetail(response)
-        throw new HttpStatusError(response.status, `Gemini request failed: ${detail}`)
+        throw new HttpStatusError(response.status, `Valueprism request failed: ${detail}`)
       }
 
-      onProgress?.('Gemini responded. Parsing the structured question plan.')
+      onProgress?.('Valueprism responded. Parsing the structured question plan.')
       const payload = await response.json()
       const content = extractGeminiText(payload)
 
       if (!content) {
-        throw new Error('Gemini returned an empty response')
+        throw new Error('Valueprism returned an empty response')
       }
 
       const parsed = JSON.parse(extractJsonObject(content)) as GeminiPlanPayload
@@ -228,7 +226,7 @@ async function generateQuestionPlan({
       shouldRetry: (error) =>
         isRetriableError(error) ||
         (error instanceof Error &&
-          ['Gemini returned an empty response', 'Gemini did not return a JSON object'].includes(error.message))
+          ['Valueprism returned an empty response', 'Valueprism did not return a JSON object'].includes(error.message))
     }
   )
 }
@@ -319,7 +317,7 @@ function createQuestionPlanStream(request: Request) {
             emitProgress({
               stageId: QUESTION_PLAN_STAGE_SEQUENCE[4],
               title: QUESTION_PLAN_STAGE_DETAILS['preparing-documents'].title,
-              description: `Preparing ${documents.length} uploaded ${documents.length === 1 ? 'document' : 'documents'} for Gemini.`
+              description: `Preparing ${documents.length} uploaded ${documents.length === 1 ? 'document' : 'documents'} for Valueprism.`
             })
 
             const documentParts: GeminiPart[] = []
@@ -338,7 +336,7 @@ function createQuestionPlanStream(request: Request) {
             emitProgress({
               stageId: QUESTION_PLAN_STAGE_SEQUENCE[5],
               title: QUESTION_PLAN_STAGE_DETAILS['generating-questions'].title,
-              description: `Sending the filing context, client matter calibration, and uploaded materials to Gemini for ${company.title}.`
+              description: `Sending the filing context, client matter calibration, and uploaded materials to Valueprism for ${company.title}.`
             })
 
             const plan = await generateQuestionPlan({

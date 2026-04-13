@@ -389,14 +389,14 @@ async function generateValuePricing({
 
       if (!response.ok) {
         const detail = await readErrorDetail(response)
-        throw new HttpStatusError(response.status, `Gemini request failed: ${detail}`)
+        throw new HttpStatusError(response.status, `Valueprism request failed: ${detail}`)
       }
 
       const payload = await response.json()
       const content = extractGeminiText(payload)
 
       if (!content) {
-        throw new Error('Gemini returned an empty pricing response')
+        throw new Error('Valueprism returned an empty pricing response')
       }
 
       return JSON.parse(extractJsonObject(content)) as GeminiPricingPayload
@@ -406,7 +406,7 @@ async function generateValuePricing({
       shouldRetry: (error) =>
         isRetriableError(error) ||
         (error instanceof Error &&
-          ['Gemini returned an empty pricing response', 'Gemini did not return a JSON object'].includes(error.message))
+          ['Valueprism returned an empty pricing response', 'Valueprism did not return a JSON object'].includes(error.message))
     }
   )
 }

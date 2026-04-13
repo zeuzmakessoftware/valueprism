@@ -44,7 +44,7 @@ export function PricingBandGraph({
         <div>
           <p className="text-[13px] font-medium text-zinc-900">Value Pricing Curve</p>
           <p className="text-[12px] text-zinc-500">
-            {narrative ?? 'Gemini returned a value-driven pricing path with a final recommended band.'}
+            {narrative ?? 'Valueprism returned a value-driven pricing path with a final recommended band.'}
           </p>
         </div>
         <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-400">

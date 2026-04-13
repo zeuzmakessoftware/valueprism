@@ -37,13 +37,13 @@ export function StepGeneratingPricing({
           <div className="p-6 border-b border-zinc-200 flex items-start justify-between gap-4">
             <div className="space-y-2">
               <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-700">
-                Post-Question Gemini Pass
+                Post-Question Valueprism Pass
               </p>
               <h2 className="text-[22px] font-semibold text-zinc-900 leading-tight">
                 Building the value pricing output
               </h2>
               <p className="text-[14px] text-zinc-600 leading-relaxed max-w-[560px]">
-                Gemini is processing the completed answers, the uploaded materials, and the matter inputs into a structured pricing recommendation and a value-driven chart path.
+                Valueprism is processing the completed answers, the uploaded materials, and the matter inputs into a structured pricing recommendation and a value-driven chart path.
               </p>
             </div>
             <div className="mt-1 flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700">
@@ -60,7 +60,7 @@ export function StepGeneratingPricing({
             <MetricCard
               label="Uploaded Documents"
               value={`${uploadedFilesCount}`}
-              detail="Sent back through the Gemini pricing pass"
+              detail="Sent back through the Valueprism pricing pass"
             />
             <MetricCard
               label="Baseline Signal"
@@ -72,8 +72,8 @@ export function StepGeneratingPricing({
           <div className="p-5 space-y-3">
             {[
               'Questionnaire complete and packaged for pricing.',
-              'Matter inputs and uploaded documents attached as Gemini context.',
-              'Gemini is producing the final value pricing output and chart moments.'
+              'Matter inputs and uploaded documents attached as Valueprism context.',
+              'Valueprism is producing the final value pricing output and chart moments.'
             ].map((item, index) => (
               <div key={item} className="flex items-start gap-3 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
                 <div
@@ -100,7 +100,7 @@ export function StepGeneratingPricing({
           <div className="space-y-2">
             <h2 className="text-[18px] font-medium text-zinc-900">Value pricing could not be completed</h2>
             <p className="text-[14px] text-zinc-600 max-w-[420px] leading-relaxed">
-              {pricingError || 'The Gemini pricing pass did not return a usable result.'}
+              {pricingError || 'The Valueprism pricing pass did not return a usable result.'}
             </p>
           </div>
           <div className="flex gap-3">

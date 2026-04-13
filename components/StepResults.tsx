@@ -42,7 +42,7 @@ export function StepResults({
               {analysis.company.name} Value Pricing Output
             </h2>
             <p className="text-[13px] text-zinc-500 mt-1">
-              Gemini synthesized this output from the uploaded materials, the intake sliders, and the completed question set.
+              Valueprism synthesized this output from the uploaded materials, the intake sliders, and the completed question set.
             </p>
           </div>
           <button
@@ -71,7 +71,7 @@ export function StepResults({
               </p>
               <div className="mt-5 rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-4 text-left">
                 <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-700">
-                  Gemini Summary
+                  Valueprism Summary
                 </p>
                 <p className="mt-2 text-[13px] leading-relaxed text-emerald-950">
                   {pricingSummary.executiveSummary}
@@ -120,7 +120,7 @@ export function StepResults({
           <MetricCard
             label="Fee Band"
             value={`${formatPercent(pricingSummary.feeBandLowPercent)}–${formatPercent(pricingSummary.feeBandHighPercent)}`}
-            detail="Adjusted by the Gemini pricing pass"
+            detail="Adjusted by the Valueprism pricing pass"
           />
           <MetricCard
             label="Matter Complexity"
@@ -132,7 +132,7 @@ export function StepResults({
         <div className="p-5 border-b border-zinc-200">
           <SectionTitle
             title="Value Breakdown"
-            subtitle="Gemini-adjusted value dimensions translated into the pricing recommendation."
+            subtitle="Valueprism-adjusted value dimensions translated into the pricing recommendation."
           />
           <div className="space-y-4">
             {pricingSummary.dimensions.map((dimension) => (
@@ -239,7 +239,7 @@ export function StepResults({
         <div className="p-5">
           <SectionTitle
             title="Pricing Summary"
-            subtitle="Gemini narrative plus the anchor metrics behind the final recommendation."
+            subtitle="Valueprism narrative plus the anchor metrics behind the final recommendation."
           />
           <div className="space-y-3">
             <SummaryRow label="Latest 10-K" value={`${pricingSummary.filingDateLabel} filing`} />

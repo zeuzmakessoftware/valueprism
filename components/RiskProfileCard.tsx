@@ -15,9 +15,8 @@ export function RiskProfileCard({
 }) {
   const marks = [
     { label: '$0', value: 0 },
-    { label: '$50M', value: 50000000 },
-    { label: '$100M', value: 100000000 },
-    { label: '$250M', value: RISK_PROFILE_MAX }
+    { label: '$5M', value: 5000000 },
+    { label: '$10M', value: RISK_PROFILE_MAX }
   ]
 
   return (

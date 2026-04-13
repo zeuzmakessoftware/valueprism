@@ -91,7 +91,7 @@ export function StepAnalyzing({
                   {analysisProgress.description}
                 </p>
                 <p className="text-[12px] leading-relaxed text-emerald-800/80">
-                  Earlier SEC and document-prep stages are complete. The UI is now focused on Gemini until it returns the structured question set.
+                  Earlier SEC and document-prep stages are complete. The UI is now focused on Valueprism until it returns the structured question set.
                 </p>
               </div>
 

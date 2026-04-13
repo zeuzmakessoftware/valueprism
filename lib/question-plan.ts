@@ -54,11 +54,11 @@ export const QUESTION_PLAN_STAGE_DETAILS: Record<
   },
   'preparing-documents': {
     title: 'Preparing uploaded documents',
-    description: 'Converting the uploaded files into Gemini-ready inputs.'
+    description: 'Converting the uploaded files into Valueprism-ready inputs.'
   },
   'generating-questions': {
     title: 'Generating review questions',
-    description: 'Sending the 10-K context and your documents to Gemini.'
+    description: 'Sending the 10-K context and your documents to Valueprism.'
   },
   'finalizing-response': {
     title: 'Finalizing response',

@@ -428,7 +428,7 @@ export default function Home() {
 
     toast.loading('Generating value pricing output', {
       id: VALUE_PRICING_TOAST_ID,
-      description: 'Gemini is synthesizing the matter inputs, uploaded documents, and completed answers.',
+      description: 'Valueprism is synthesizing the matter inputs, uploaded documents, and completed answers.',
       duration: Infinity
     })
 
@@ -438,7 +438,7 @@ export default function Home() {
       setStep(7)
       toast.success('Value pricing output ready', {
         id: VALUE_PRICING_TOAST_ID,
-        description: `Generated a Gemini-backed pricing recommendation for ${analysis.company.name}.`
+        description: `Generated a Valueprism-backed pricing recommendation for ${analysis.company.name}.`
       })
     } catch (error) {
       const message = getErrorMessage(error)

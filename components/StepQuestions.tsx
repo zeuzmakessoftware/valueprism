@@ -137,7 +137,7 @@ export function StepQuestions({
           onClick={onNextQuestion}
           className="h-11 px-6 rounded-xl bg-zinc-900 text-white text-[14px] font-medium disabled:opacity-50 disabled:cursor-not-allowed hover:bg-zinc-800 transition-colors"
         >
-          {currentQuestionIndex === questions.length - 1 ? 'Generate Gemini Pricing Output' : 'Next Question'}
+          {currentQuestionIndex === questions.length - 1 ? 'Generate Valueprism Pricing Output' : 'Next Question'}
         </button>
       </div>
     </motion.div>

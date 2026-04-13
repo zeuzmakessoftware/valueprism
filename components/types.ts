@@ -164,7 +164,7 @@ export const DEFAULT_MATTER_PROFILE: MatterProfile = {
   visibilityIndex: 1
 }
 export const MATTER_PROFILE_SCORE_MAX = 40
-export const RISK_PROFILE_MAX = 250000000
+export const RISK_PROFILE_MAX = 10000000
 export const RISK_PROFILE_STEP = 250000
 export const DIMENSION_META: Array<{
   key: ValueDimensionKey

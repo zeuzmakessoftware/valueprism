@@ -55,10 +55,10 @@ export function StepMatterProfile({
                   Matter Inputs
                 </p>
                 <h1 className="mt-3 text-[24px] font-semibold tracking-tight text-zinc-900">
-                  Calibrate the matter before Gemini runs
+                  Calibrate the matter before Valueprism runs
                 </h1>
                 <p className="mt-2 text-[14px] leading-relaxed text-zinc-600">
-                  These inputs are sent with the filing and uploaded materials so Gemini can tailor the question set to the client&apos;s business context.
+                  These inputs are sent with the filing and uploaded materials so Valueprism can tailor the question set to the client&apos;s business context.
                 </p>
               </div>
               <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3">
